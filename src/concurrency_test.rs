@@ -1,10 +1,10 @@
 use crate::http_client::HttpClientService;
+use crate::json_processor::JsonProcessor;
 use serde_json::Value;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
+use uuid::Uuid;
 
 /// 并发测试配置
 #[derive(Debug, Clone, serde::Serialize)]
@@ -108,20 +108,37 @@ impl ConcurrencyTestService {
                     let request_start = Instant::now();
                     let timestamp = chrono::Utc::now().to_rfc3339();
 
-                    // 在请求报文中添加唯一标识
                     let modified_body =
                         if let Ok(mut json_value) = serde_json::from_str::<Value>(&body) {
-                            if let Value::Object(ref mut map) = json_value {
-                                map.insert(
-                                    "request_id".to_string(),
-                                    Value::Number(serde_json::Number::from(request_id)),
-                                );
-                                map.insert(
-                                    "request_timestamp".to_string(),
+                            // 为每个并发任务生成唯一的 UUID
+                            let task_uuid = Uuid::new_v4().to_string();
+
+                            // 替换字段值，添加 UUID
+                            let modifications = vec![
+                                (
+                                    "TaskInfo.picture.0.targetAttrs.request_timestamp".to_string(),
                                     Value::String(timestamp.clone()),
-                                );
+                                ),
+                                (
+                                    "TaskInfo.picture.0.targetAttrs.request_id".to_string(),
+                                    Value::Number(serde_json::Number::from(request_id)),
+                                ),
+                                (
+                                    "TaskInfo.picture.0.targetAttrs.task_uuid".to_string(),
+                                    Value::String(task_uuid.clone()),
+                                ),
+                            ];
+
+                            for (field_path, new_value) in modifications {
+                                if let Err(e) = JsonProcessor::modify_json_field(
+                                    &mut json_value,
+                                    &field_path,
+                                    new_value,
+                                ) {
+                                    eprintln!("修改字段 {} 失败: {}", field_path, e);
+                                }
                             }
-                            serde_json::to_string(&json_value).unwrap_or(body)
+                            JsonProcessor::format_json_pretty(&json_value).unwrap_or(body)
                         } else {
                             body
                         };

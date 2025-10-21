@@ -176,6 +176,7 @@ impl HttpServerService {
 
         // 解析报警内容中的请求ID
         let mut request_id: Option<usize> = None;
+        let mut task_uuid: Option<String> = None;
         let alert_message_summary = if alert.message.len() > 50 {
             format!("{}...", &alert.message[..50])
         } else {
@@ -189,8 +190,27 @@ impl HttpServerService {
             }
         }
 
-        // 如果从metadata中没找到，尝试从消息中解析
+        // 如果从metadata中没找到，尝试解析 message 字段为 response_data.json 格式
         if request_id.is_none() {
+            // 尝试解析 message 字段为 JSON
+            if let Ok(response_data) = serde_json::from_str::<Value>(&alert.message) {
+                // 检查是否是 response_data.json 格式
+                if response_data.get("analysisResult").is_some() {
+                    // 从 analysisResult 中提取 taskID
+                    if let Some(Value::Array(results)) = response_data.get("analysisResult") {
+                        if !results.is_empty() {
+                            if let Some(Value::String(task_id)) = results[0].get("taskID") {
+                                task_uuid = Some(task_id.clone());
+                                println!("从报警消息中提取到 taskID: {}", task_id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 如果从metadata中没找到，尝试从消息中解析请求ID
+        if request_id.is_none() && task_uuid.is_none() {
             // 简单的正则匹配，查找 "request_id": 123 这样的模式
             let re = regex::Regex::new(r#""request_id"\s*:\s*(\d+)"#).unwrap();
             if let Some(caps) = re.captures(&alert.message) {
@@ -200,8 +220,51 @@ impl HttpServerService {
             }
         }
 
+        // 如果找到了 task_uuid，从并发任务中查找匹配的请求
+        if let Some(task_id) = &task_uuid {
+            let mut correlations = correlation_state.correlations.lock().await;
+            let request_results = correlation_state.request_results.lock().await;
+
+            // 查找包含相同 task_uuid 的请求结果
+            let matched_request = request_results
+                .iter()
+                .find(|result| {
+                    // 检查请求结果中是否包含这个 task_uuid
+                    // 这里假设 task_uuid 存储在请求体的某个字段中
+                    // 在实际实现中，需要检查请求的具体内容
+                    result
+                        .error_message
+                        .as_ref()
+                        .map_or(false, |msg| msg.contains(task_id))
+                })
+                .cloned();
+
+            if let Some(result) = matched_request {
+                let correlation = RequestAlertCorrelation {
+                    request_id: result.request_id,
+                    request_success: result.success,
+                    request_time: result.timestamp.clone(),
+                    alert_received_time: alert.timestamp.clone(),
+                    alert_message_summary: format!("关联 taskID: {}", task_id),
+                };
+
+                correlations.push(correlation);
+
+                println!(
+                    "收到报警并与请求关联 - 请求ID: {}, taskID: {}, 成功: {}, 请求时间: {}, 报警时间: {}",
+                    result.request_id, task_id, result.success, result.timestamp, alert.timestamp
+                );
+
+                request_id = Some(result.request_id);
+            } else {
+                println!(
+                    "收到报警但未找到对应的请求记录 - taskID: {}, 报警摘要: {}",
+                    task_id, alert_message_summary
+                );
+            }
+        }
         // 如果找到了请求ID，创建关联记录
-        if let Some(req_id) = request_id {
+        else if let Some(req_id) = request_id {
             let mut correlations = correlation_state.correlations.lock().await;
             let request_results = correlation_state.request_results.lock().await;
 
@@ -248,7 +311,9 @@ impl HttpServerService {
             "message": "报警接收成功",
             "alert_id": alert.id,
             "request_id_found": request_id.is_some(),
-            "request_id": request_id
+            "request_id": request_id,
+            "task_uuid_found": task_uuid.is_some(),
+            "task_uuid": task_uuid
         })))
     }
 
