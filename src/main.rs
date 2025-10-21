@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 创建 HTTP 客户端
     let http_config = config_manager
-        .create_http_client_config_with_digest_auth("admin".to_string(), "password".to_string());
+        .create_http_client_config_with_digest_auth("admin".to_string(), "DCtest@v587".to_string());
     let http_client = HttpClientService::new(http_config)?;
 
     // 读取或创建示例 JSON 文件

@@ -1,8 +1,9 @@
 use base64::prelude::*;
 use md5::{Digest, Md5};
-use reqwest::Error;
+use reqwest::{Error, cookie::Jar};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// HTTP 客户端配置
@@ -92,21 +93,31 @@ impl DigestChallenge {
 pub struct HttpClientService {
     client: reqwest::Client,
     config: HttpClientConfig,
+    cookie_jar: Arc<Jar>, // Cookie 存储
 }
 
 impl HttpClientService {
     /// 创建新的 HTTP 客户端服务
     pub fn new(config: HttpClientConfig) -> Result<Self, Error> {
+        // 创建共享的 Cookie Jar
+        let cookie_jar = Arc::new(Jar::default());
+
+        // 创建带有 Cookie 存储的客户端
         let client = reqwest::Client::builder()
             .timeout(config.timeout)
             .user_agent(&config.user_agent)
             .danger_accept_invalid_certs(true) // 禁用 SSL 证书验证
+            .cookie_provider(Arc::clone(&cookie_jar)) // 启用 Cookie 存储
             .build()?;
 
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            config,
+            cookie_jar,
+        })
     }
 
-    /// 发送 POST 请求（支持 Digest 认证）
+    /// 发送 POST 请求（支持智能认证和 Cookie 保持）
     pub async fn post_json(
         &self,
         url: &str,
@@ -125,10 +136,22 @@ impl HttpClientService {
             }
         }
 
-        // 处理认证
-        request = self.add_auth(request, url, "POST").await?;
+        // 智能认证处理：先尝试无认证请求，如果失败再添加认证
+        let response = request.try_clone().unwrap().send().await?;
 
-        request.send().await
+        // 检查是否需要认证
+        if response.status().as_u16() == 401 {
+            println!("检测到 401 认证失败，重新发送认证请求...");
+
+            // 处理认证
+            request = self.add_auth(request, url, "POST").await?;
+
+            // 重新发送认证请求
+            request.send().await
+        } else {
+            // 认证成功或不需要认证，直接返回响应
+            Ok(response)
+        }
     }
 
     /// 添加认证到请求
@@ -166,25 +189,28 @@ impl HttpClientService {
         method: &str,
         auth_config: &AuthConfig,
     ) -> Result<String, Error> {
-        // 先发送挑战请求获取 nonce
+        // 先发送挑战请求获取 nonce（不包含认证信息，故意触发 401 获取挑战）
         let challenge_response = self
             .client
-            .get(url) // 使用 GET 方法获取挑战信息
+            .get(url)
+            .header("Content-Type", "application/json")
             .send()
             .await?;
 
+        // 检查是否有 WWW-Authenticate 头
         let challenge =
             if let Some(auth_header) = challenge_response.headers().get("WWW-Authenticate") {
-                if let Some(challenge) =
-                    DigestChallenge::from_header(auth_header.to_str().unwrap_or(""))
-                {
+                let header_str = auth_header.to_str().unwrap_or("");
+                println!("收到认证挑战: {}", header_str);
+
+                if let Some(challenge) = DigestChallenge::from_header(header_str) {
                     challenge
                 } else {
-                    // 如果没有 Digest 挑战，回退到 Basic 认证
+                    println!("无法解析 Digest 挑战，回退到 Basic 认证");
                     return self.build_basic_auth_header(auth_config);
                 }
             } else {
-                // 如果没有认证头，回退到 Basic 认证
+                println!("服务器未返回 WWW-Authenticate 头，回退到 Basic 认证");
                 return self.build_basic_auth_header(auth_config);
             };
 
@@ -213,6 +239,7 @@ impl HttpClientService {
             auth_header.push_str(&format!(", opaque=\"{}\"", opaque));
         }
 
+        println!("生成的 Digest 认证头: {}", auth_header);
         Ok(auth_header)
     }
 
