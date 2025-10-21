@@ -51,7 +51,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 创建 HTTP 客户端
-    let http_config = config_manager.create_http_client_config();
+    let http_config = config_manager
+        .create_http_client_config_with_digest_auth("admin".to_string(), "password".to_string());
     let http_client = HttpClientService::new(http_config)?;
 
     // 读取或创建示例 JSON 文件
@@ -68,7 +69,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let test_config = HMSClipTest_rs::concurrency_test::ConcurrencyConfig {
         requests_per_second: 10, // 测试时使用较小的并发数
         duration_seconds: 5,     // 测试时使用较短的持续时间
-        url: "https://jsonplaceholder.typicode.com/posts".to_string(),
+        url: "https://10.41.131.103/ISAPI/Intelligent/AIOpenPlatform/pictureTask?format=json"
+            .to_string(),
     };
 
     println!("并发请求配置: {:?}", test_config);

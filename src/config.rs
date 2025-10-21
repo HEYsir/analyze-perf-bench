@@ -154,7 +154,58 @@ impl ConfigManager {
         crate::http_client::HttpClientConfig {
             timeout: self.get_http_client_timeout(),
             user_agent: self.config.http_client.user_agent.clone(),
+            auth: None, // 默认不设置认证，由调用方根据需要配置
         }
+    }
+
+    /// 创建带有认证的 HTTP 客户端配置
+    pub fn create_http_client_config_with_auth(
+        &self,
+        username: Option<String>,
+        password: Option<String>,
+        auth_type: Option<crate::http_client::AuthType>,
+    ) -> crate::http_client::HttpClientConfig {
+        let auth_config = if let (Some(username), Some(password)) = (username, password) {
+            Some(crate::http_client::AuthConfig {
+                username,
+                password,
+                auth_type: auth_type.unwrap_or(crate::http_client::AuthType::Digest),
+            })
+        } else {
+            None
+        };
+
+        crate::http_client::HttpClientConfig {
+            timeout: self.get_http_client_timeout(),
+            user_agent: self.config.http_client.user_agent.clone(),
+            auth: auth_config,
+        }
+    }
+
+    /// 创建默认的 Digest 认证 HTTP 客户端配置
+    pub fn create_http_client_config_with_digest_auth(
+        &self,
+        username: String,
+        password: String,
+    ) -> crate::http_client::HttpClientConfig {
+        self.create_http_client_config_with_auth(
+            Some(username),
+            Some(password),
+            Some(crate::http_client::AuthType::Digest),
+        )
+    }
+
+    /// 创建默认的 Basic 认证 HTTP 客户端配置
+    pub fn create_http_client_config_with_basic_auth(
+        &self,
+        username: String,
+        password: String,
+    ) -> crate::http_client::HttpClientConfig {
+        self.create_http_client_config_with_auth(
+            Some(username),
+            Some(password),
+            Some(crate::http_client::AuthType::Basic),
+        )
     }
 
     /// 创建并发测试配置
