@@ -4,15 +4,25 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use warp::Filter;
 
-/// 报警数据结构
+/// 报警数据结构（基于 response_data.json 格式）
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
 pub struct Alert {
     pub id: String,
     pub level: String, // "critical", "warning", "info"
-    pub message: String,
     pub timestamp: String,
     pub source: Option<String>,
-    pub metadata: Option<serde_json::Value>,
+
+    // response_data.json 格式的报警内容
+    pub analysis_result: Option<serde_json::Value>,
+
+    // 或者直接存储解析后的关键字段
+    pub task_id: Option<String>,
+    pub ip_address: Option<String>,
+    pub event_type: Option<String>,
+    pub event_description: Option<String>,
+
+    // 原始消息（用于向后兼容或存储原始数据）
+    pub original_message: Option<String>,
 }
 
 /// 请求与报警关联记录
@@ -162,7 +172,7 @@ impl HttpServerService {
         Ok(())
     }
 
-    /// 处理报警接收
+    /// 处理报警接收（基于 response_data.json 格式）
     async fn handle_alert(
         alert: Alert,
         state: ServerState,
@@ -171,56 +181,44 @@ impl HttpServerService {
         let mut alerts = state.alerts.lock().await;
         let mut count = state.alert_count.lock().await;
 
-        alerts.push(alert.clone());
-        *count += 1;
-
-        // 解析报警内容中的请求ID
+        // 处理报警数据，提取关键信息
+        let mut processed_alert = alert.clone();
         let mut request_id: Option<usize> = None;
         let mut task_uuid: Option<String> = None;
-        let alert_message_summary = if alert.message.len() > 50 {
-            format!("{}...", &alert.message[..50])
-        } else {
-            alert.message.clone()
-        };
 
-        // 尝试从消息中提取请求ID
-        if let Some(metadata) = &alert.metadata {
-            if let Some(Value::Number(id)) = metadata.get("request_id") {
-                request_id = id.as_u64().map(|id| id as usize);
+        // 优先使用直接提供的 task_id
+        if let Some(task_id) = &alert.task_id {
+            task_uuid = Some(task_id.clone());
+            println!("从报警数据中获取到 taskID: {}", task_id);
+        }
+        // 如果 analysis_result 存在，从中提取 taskID
+        else if let Some(analysis_result) = &alert.analysis_result {
+            if let Some(Value::Array(results)) = analysis_result.get("analysisResult") {
+                if !results.is_empty() {
+                    if let Some(Value::String(task_id)) = results[0].get("taskID") {
+                        task_uuid = Some(task_id.clone());
+                        processed_alert.task_id = Some(task_id.clone());
+                        println!("从 analysis_result 中提取到 taskID: {}", task_id);
+                    }
+                }
             }
         }
-
-        // 如果从metadata中没找到，尝试解析 message 字段为 response_data.json 格式
-        if request_id.is_none() {
-            // 尝试解析 message 字段为 JSON
-            if let Ok(response_data) = serde_json::from_str::<Value>(&alert.message) {
-                // 检查是否是 response_data.json 格式
-                if response_data.get("analysisResult").is_some() {
-                    // 从 analysisResult 中提取 taskID
-                    if let Some(Value::Array(results)) = response_data.get("analysisResult") {
-                        if !results.is_empty() {
-                            if let Some(Value::String(task_id)) = results[0].get("taskID") {
-                                task_uuid = Some(task_id.clone());
-                                println!("从报警消息中提取到 taskID: {}", task_id);
-                            }
+        // 如果 original_message 存在，尝试解析
+        else if let Some(original_message) = &alert.original_message {
+            if let Ok(response_data) = serde_json::from_str::<Value>(original_message) {
+                if let Some(Value::Array(results)) = response_data.get("analysisResult") {
+                    if !results.is_empty() {
+                        if let Some(Value::String(task_id)) = results[0].get("taskID") {
+                            task_uuid = Some(task_id.clone());
+                            processed_alert.task_id = Some(task_id.clone());
+                            println!("从 original_message 中提取到 taskID: {}", task_id);
                         }
                     }
                 }
             }
         }
 
-        // 如果从metadata中没找到，尝试从消息中解析请求ID
-        if request_id.is_none() && task_uuid.is_none() {
-            // 简单的正则匹配，查找 "request_id": 123 这样的模式
-            let re = regex::Regex::new(r#""request_id"\s*:\s*(\d+)"#).unwrap();
-            if let Some(caps) = re.captures(&alert.message) {
-                if let Ok(id) = caps[1].parse::<usize>() {
-                    request_id = Some(id);
-                }
-            }
-        }
-
-        // 如果找到了 task_uuid，从并发任务中查找匹配的请求
+        // 基于 taskID 查找匹配的请求
         if let Some(task_id) = &task_uuid {
             let mut correlations = correlation_state.correlations.lock().await;
             let request_results = correlation_state.request_results.lock().await;
@@ -230,8 +228,6 @@ impl HttpServerService {
                 .iter()
                 .find(|result| {
                     // 检查请求结果中是否包含这个 task_uuid
-                    // 这里假设 task_uuid 存储在请求体的某个字段中
-                    // 在实际实现中，需要检查请求的具体内容
                     result
                         .error_message
                         .as_ref()
@@ -257,63 +253,22 @@ impl HttpServerService {
 
                 request_id = Some(result.request_id);
             } else {
-                println!(
-                    "收到报警但未找到对应的请求记录 - taskID: {}, 报警摘要: {}",
-                    task_id, alert_message_summary
-                );
+                println!("收到报警但未找到对应的请求记录 - taskID: {}", task_id);
             }
         }
-        // 如果找到了请求ID，创建关联记录
-        else if let Some(req_id) = request_id {
-            let mut correlations = correlation_state.correlations.lock().await;
-            let request_results = correlation_state.request_results.lock().await;
 
-            // 查找对应的请求结果
-            let request_result = request_results
-                .iter()
-                .find(|r| r.request_id == req_id)
-                .cloned();
-
-            if let Some(result) = request_result {
-                let correlation = RequestAlertCorrelation {
-                    request_id: req_id,
-                    request_success: result.success,
-                    request_time: result.timestamp.clone(),
-                    alert_received_time: alert.timestamp.clone(),
-                    alert_message_summary: alert_message_summary.clone(),
-                };
-
-                correlations.push(correlation);
-
-                println!(
-                    "收到报警并与请求关联 - 请求ID: {}, 成功: {}, 请求时间: {}, 报警时间: {}, 报警摘要: {}",
-                    req_id,
-                    result.success,
-                    result.timestamp,
-                    alert.timestamp,
-                    alert_message_summary
-                );
-            } else {
-                println!(
-                    "收到报警但未找到对应的请求记录 - 请求ID: {}, 报警摘要: {}",
-                    req_id, alert_message_summary
-                );
-            }
-        } else {
-            println!(
-                "收到新报警（未关联请求）: {} - {}",
-                alert.level, alert_message_summary
-            );
-        }
+        // 保存处理后的报警数据
+        alerts.push(processed_alert);
+        *count += 1;
 
         Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
             "status": "success",
             "message": "报警接收成功",
             "alert_id": alert.id,
-            "request_id_found": request_id.is_some(),
-            "request_id": request_id,
             "task_uuid_found": task_uuid.is_some(),
-            "task_uuid": task_uuid
+            "task_uuid": task_uuid,
+            "request_id_found": request_id.is_some(),
+            "request_id": request_id
         })))
     }
 
