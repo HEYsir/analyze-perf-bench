@@ -316,7 +316,39 @@ impl HttpServerService {
     }
 }
 
-/// 简化的服务器启动函数
+/// 在后台启动 HTTP 服务器（不阻塞主线程）
+pub async fn start_http_server_background(
+    port: u16,
+) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error>> {
+    let server_handle = tokio::spawn(async move {
+        if let Err(e) = HttpServerService::start_server(port).await {
+            eprintln!("HTTP 服务器运行错误: {}", e);
+        }
+    });
+
+    // 等待一小段时间确保服务器正在启动
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    Ok(server_handle)
+}
+
+/// 简化的服务器启动函数（保持向后兼容）
 pub async fn start_http_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     HttpServerService::start_server(port).await
+}
+
+/// 获取服务器状态（用于检查服务器是否正在运行）
+pub async fn check_server_health(port: u16) -> Result<bool, Box<dyn std::error::Error>> {
+    let client = reqwest::Client::new();
+    let url = format!("http://localhost:{}/health", port);
+
+    match client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+    {
+        Ok(response) => Ok(response.status().is_success()),
+        Err(_) => Ok(false),
+    }
 }

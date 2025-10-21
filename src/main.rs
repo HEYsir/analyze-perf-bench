@@ -26,9 +26,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         return Ok(());
     }
-    // 使用备用端口避免冲突
-    match start_http_server(8081).await {
-        Ok(_) => println!("HTTP 服务器已启动"),
+    // 在后台启动 HTTP 服务器（不阻塞主线程）
+    let port = 8081;
+    match start_http_server_background(port).await {
+        Ok(server_handle) => {
+            println!("HTTP 服务器已在后台启动，端口: {}", port);
+
+            // 等待服务器启动并检查状态
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            match check_server_health(port).await {
+                Ok(true) => println!("HTTP 服务器健康检查通过"),
+                Ok(false) => eprintln!("HTTP 服务器健康检查失败"),
+                Err(e) => eprintln!("HTTP 服务器健康检查错误: {}", e),
+            }
+
+            // 保存服务器句柄（如果需要后续控制）
+            let _server_handle = server_handle;
+        }
         Err(e) => {
             eprintln!("HTTP 服务器启动失败: {}", e);
             return Ok(());
@@ -49,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // 配置并发请求参数
-    let concurrency_config = config_manager.create_concurrency_config();
+    let _concurrency_config = config_manager.create_concurrency_config();
     let test_config = HMSClipTest_rs::concurrency_test::ConcurrencyConfig {
         requests_per_second: 10, // 测试时使用较小的并发数
         duration_seconds: 5,     // 测试时使用较短的持续时间
