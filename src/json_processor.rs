@@ -98,36 +98,85 @@ impl JsonProcessor {
 
         if remaining_parts.is_empty() {
             // 到达目标字段
-            if let Value::Object(map) = value {
-                map.insert(current_part.to_string(), new_value);
-                Ok(())
-            } else {
-                Err(JsonProcessorError::TemplateError(
-                    "目标不是对象，无法插入字段".to_string(),
-                ))
+            match value {
+                Value::Object(map) => {
+                    map.insert(current_part.to_string(), new_value);
+                    Ok(())
+                }
+                Value::Array(arr) => {
+                    // 处理数组索引
+                    if let Ok(index) = current_part.parse::<usize>() {
+                        if index < arr.len() {
+                            arr[index] = new_value;
+                            Ok(())
+                        } else {
+                            Err(JsonProcessorError::TemplateError(format!(
+                                "数组索引 {} 超出范围 (数组长度: {})",
+                                index,
+                                arr.len()
+                            )))
+                        }
+                    } else {
+                        Err(JsonProcessorError::TemplateError(format!(
+                            "无效的数组索引: {}",
+                            current_part
+                        )))
+                    }
+                }
+                _ => Err(JsonProcessorError::TemplateError(
+                    "目标不是对象或数组，无法修改字段".to_string(),
+                )),
             }
         } else {
             // 继续深入嵌套结构
-            if let Value::Object(map) = value {
-                if let Some(next_value) = map.get_mut(current_part) {
-                    Self::modify_nested_field(next_value, remaining_parts, new_value)
-                } else {
-                    // 创建中间对象
-                    let new_map = serde_json::Map::new();
-                    map.insert(current_part.to_string(), Value::Object(new_map));
-
+            match value {
+                Value::Object(map) => {
                     if let Some(next_value) = map.get_mut(current_part) {
                         Self::modify_nested_field(next_value, remaining_parts, new_value)
                     } else {
-                        Err(JsonProcessorError::TemplateError(
-                            "无法创建中间对象".to_string(),
-                        ))
+                        // 检查下一部分是否是数组索引
+                        let next_part = remaining_parts[0];
+                        if let Ok(_) = next_part.parse::<usize>() {
+                            // 下一部分是数组索引，创建数组
+                            let new_array = Value::Array(Vec::new());
+                            map.insert(current_part.to_string(), new_array);
+                        } else {
+                            // 下一部分是对象字段，创建对象
+                            let new_map = serde_json::Map::new();
+                            map.insert(current_part.to_string(), Value::Object(new_map));
+                        }
+
+                        if let Some(next_value) = map.get_mut(current_part) {
+                            Self::modify_nested_field(next_value, remaining_parts, new_value)
+                        } else {
+                            Err(JsonProcessorError::TemplateError(
+                                "无法创建中间结构".to_string(),
+                            ))
+                        }
                     }
                 }
-            } else {
-                Err(JsonProcessorError::TemplateError(
-                    "当前路径不是对象".to_string(),
-                ))
+                Value::Array(arr) => {
+                    // 处理数组中的对象
+                    if let Ok(index) = current_part.parse::<usize>() {
+                        if index < arr.len() {
+                            Self::modify_nested_field(&mut arr[index], remaining_parts, new_value)
+                        } else {
+                            Err(JsonProcessorError::TemplateError(format!(
+                                "数组索引 {} 超出范围 (数组长度: {})",
+                                index,
+                                arr.len()
+                            )))
+                        }
+                    } else {
+                        Err(JsonProcessorError::TemplateError(format!(
+                            "无效的数组索引: {}",
+                            current_part
+                        )))
+                    }
+                }
+                _ => Err(JsonProcessorError::TemplateError(
+                    "当前路径不是对象或数组".to_string(),
+                )),
             }
         }
     }
