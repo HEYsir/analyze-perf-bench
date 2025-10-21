@@ -100,5 +100,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("请求完成！所有示例执行完毕。");
 
+    // 保持程序运行，等待用户输入
+    println!("\nHTTP 服务器仍在后台运行，端口: {}", port);
+    println!("可以继续发送报警到: http://localhost:{}/alert", port);
+    println!("查看所有报警: http://localhost:{}/alerts", port);
+    println!("健康检查: http://localhost:{}/health", port);
+    println!("\n按 'q' + Enter 退出程序，或按其他键 + Enter 检查服务器状态...");
+
+    loop {
+        let mut input = String::new();
+        match std::io::stdin().read_line(&mut input) {
+            Ok(_) => {
+                match input.trim() {
+                    "q" | "Q" => {
+                        println!("正在退出程序...");
+                        break;
+                    }
+                    _ => {
+                        // 检查服务器状态
+                        match check_server_health(port).await {
+                            Ok(true) => println!("✅ HTTP 服务器运行正常"),
+                            Ok(false) => println!("❌ HTTP 服务器健康检查失败"),
+                            Err(e) => println!("❌ HTTP 服务器检查错误: {}", e),
+                        }
+                        println!("按 'q' + Enter 退出程序，或按其他键 + Enter 再次检查状态...");
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!("读取输入错误: {}", error);
+                println!("按 'q' + Enter 退出程序...");
+            }
+        }
+    }
+
+    println!("程序已退出。");
     Ok(())
 }
