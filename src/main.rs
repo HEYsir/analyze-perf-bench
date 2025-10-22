@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 创建 HTTP 客户端
     let http_config = config_manager
-        .create_http_client_config_with_digest_auth("admin".to_string(), "DCtest@v587".to_string());
+        .create_http_client_config_with_digest_auth("admin".to_string(), "backend15".to_string());
     let http_client = HttpClientService::new(http_config)?;
 
     // 读取或创建示例 JSON 文件
@@ -67,9 +67,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 配置并发请求参数
     let _concurrency_config = config_manager.create_concurrency_config();
     let test_config = HMSClipTest_rs::concurrency_test::ConcurrencyConfig {
-        requests_per_second: 10, // 测试时使用较小的并发数
-        duration_seconds: 5,     // 测试时使用较短的持续时间
-        url: "https://10.41.131.103/ISAPI/Intelligent/AIOpenPlatform/pictureTask?format=json"
+        requests_per_second: 1, // 测试时使用较小的并发数
+        duration_seconds: 1,    // 测试时使用较短的持续时间
+        url: "http://10.41.131.102/ISAPI/Intelligent/AIOpenPlatform/pictureTask?format=json"
             .to_string(),
     };
 

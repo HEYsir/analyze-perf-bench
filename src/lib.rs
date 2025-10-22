@@ -18,7 +18,10 @@ pub use concurrency_test::{
     ConcurrencyConfig, ConcurrencyTestResult, ConcurrencyTestService, run_simple_concurrency_test,
 };
 pub use config::{AppConfig, ConfigManager, create_default_config, create_test_config};
-pub use http_client::{HttpClientConfig, HttpClientService, send_post_request};
+pub use http_client::{
+    HttpClientConfig, HttpClientService, send_post_request_with_basic_auth,
+    send_post_request_with_digest_auth,
+};
 pub use http_server::{Alert, HttpServerService, ServerState, start_http_server};
 pub use json_processor::{JsonProcessor, JsonProcessorError, parse_and_modify_json};
 
