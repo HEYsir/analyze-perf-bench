@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use warp::Filter;
+use crate::message::{Message, MessageProcessor, MessageSource}; // <-- 新增导入
 
 /// 报警数据结构（基于 response_data.json 格式）
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
@@ -217,6 +218,21 @@ impl HttpServerService {
                 }
             }
         }
+
+        // 在保存之前，异步把统一消息交给 MessageProcessor 处理（非阻塞）
+        let msg = Message {
+            id: alert.id.clone(),
+            source: MessageSource::Http,
+            payload: serde_json::to_value(&alert).unwrap_or(Value::Null),
+            received_at: chrono::Utc::now(),
+        };
+
+        // 使用独立任务处理，避免阻塞请求响应
+        tokio::spawn(async move {
+            if let Err(e) = MessageProcessor::process_message(msg).await {
+                eprintln!("Message processing error: {}", e);
+            }
+        });
 
         // 基于 taskID 查找匹配的请求
         if let Some(task_id) = &task_uuid {
