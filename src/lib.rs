@@ -13,6 +13,7 @@ pub mod http_client;
 pub mod http_server;
 pub mod json_processor;
 pub mod message; // <-- 新增
+pub mod db; // <-- 新增
 
 // 重新导出主要类型，方便使用
 pub use concurrency_test::{
@@ -23,6 +24,7 @@ pub use http_client::{HttpClientConfig, HttpClientService};
 pub use http_server::{Alert, HttpServerService, ServerState, start_http_server};
 pub use json_processor::{JsonProcessor, JsonProcessorError, parse_and_modify_json};
 pub use message::{Message, MessageProcessor, MessageSource}; // <-- 新增导出
+pub use db::SqliteRecorder; // <-- 导出记录器（可选）
 
 /// 库版本信息
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

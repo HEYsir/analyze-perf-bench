@@ -1,5 +1,6 @@
 use crate::http_client::HttpClientService;
 use crate::json_processor::JsonProcessor;
+use crate::db::SqliteRecorder; // <-- 新增导入
 use serde_json::Value;
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
@@ -82,6 +83,10 @@ impl ConcurrencyTestService {
         let mut failed_requests = 0;
         let mut all_request_results = Vec::new();
 
+        // 初始化 SQLite 记录器
+        let recorder = SqliteRecorder::new("requests.db");
+        recorder.init("requests.db").await?; // <- 传入路径参数，确保后台线程使用指定 DB 文件
+
         println!(
             "开始 {} 秒的并发测试，每秒 {} 个请求...",
             config.duration_seconds, config.requests_per_second
@@ -103,10 +108,13 @@ impl ConcurrencyTestService {
                 let url = config.url.clone();
                 let body = request_body.to_string();
                 let request_id = total_requests + i + 1;
+                let seq_in_second = i + 1;
+                let recorder_cloned = recorder.clone(); // clone recorder 到任务内
 
                 join_set.spawn(async move {
                     let request_start = Instant::now();
                     let timestamp = chrono::Utc::now().to_rfc3339();
+                    let ts_seconds = chrono::Utc::now().timestamp();
 
                     let modified_body =
                         if let Ok(mut json_value) = serde_json::from_str::<Value>(&body) {
@@ -138,61 +146,151 @@ impl ConcurrencyTestService {
                                     eprintln!("修改字段 {} 失败: {}", field_path, e);
                                 }
                             }
-                            JsonProcessor::format_json_pretty(&json_value).unwrap_or(body)
-                        } else {
-                            body
-                        };
+                            let body_out = JsonProcessor::format_json_pretty(&json_value).unwrap_or(body);
 
-                    let result = client
-                        .post_json(
-                            &url,
-                            &modified_body,
-                            Some(vec![("X-Request-ID", &request_id.to_string())]),
-                        )
-                        .await;
+                            // 发送请求并记录结果
+                            let result = client
+                                .post_json(&url, &body_out, Some(vec![("X-Request-ID", &request_id.to_string())]))
+                                .await;
 
-                    let response_time = request_start.elapsed();
+                            let response_time = request_start.elapsed();
 
-                    match result {
-                        Ok(response) => {
-                            let status = response.status();
-                            let status_code = Some(status.as_u16());
+                            let (request_result, task_uuid_for_db) = match result {
+                                Ok(response) => {
+                                    let status = response.status();
+                                    let status_code = Some(status.as_u16());
 
-                            if status.is_success() {
-                                // 尝试获取响应体中的 request_id 进行验证
-                                let _response_body = match response.text().await {
-                                    Ok(text) => Some(text),
-                                    Err(_) => None,
-                                };
+                                    if status.is_success() {
+                                        // 尝试获取响应体中的 request_id 进行验证
+                                        let _response_body = match response.text().await {
+                                            Ok(text) => Some(text),
+                                            Err(_) => None,
+                                        };
 
-                                RequestResult {
-                                    request_id,
-                                    success: true,
-                                    status_code,
-                                    response_time_ms: response_time.as_millis(),
-                                    timestamp,
-                                    error_message: None,
+                                        (RequestResult {
+                                            request_id,
+                                            success: true,
+                                            status_code,
+                                            response_time_ms: response_time.as_millis(),
+                                            timestamp,
+                                            error_message: None,
+                                        }, Some(task_uuid))
+                                    } else {
+                                        (RequestResult {
+                                            request_id,
+                                            success: false,
+                                            status_code,
+                                            response_time_ms: response_time.as_millis(),
+                                            timestamp,
+                                            error_message: Some(format!("HTTP错误: {}", status)),
+                                        }, Some(task_uuid))
+                                    }
                                 }
-                            } else {
-                                RequestResult {
+                                Err(e) => (RequestResult {
                                     request_id,
                                     success: false,
-                                    status_code,
+                                    status_code: None,
                                     response_time_ms: response_time.as_millis(),
                                     timestamp,
-                                    error_message: Some(format!("HTTP错误: {}", status)),
+                                    error_message: Some(format!("请求错误: {}", e)),
+                                }, None),
+                            };
+
+                            // 将记录写入 SQLite（非阻塞）
+                            if let Err(e) = recorder_cloned
+                                .insert_request(
+                                    ts_seconds,
+                                    task_uuid_for_db,
+                                    request_result.request_id,
+                                    seq_in_second,
+                                    request_result.success,
+                                    request_result.error_message.clone(),
+                                )
+                                .await
+                            {
+                                eprintln!("写入 SQLite 失败: {}", e);
+                            }
+
+                            request_result
+                        } else {
+                            // JSON 解析失败，直接发送原始 body
+                            let result = client
+                                .post_json(&url, &body, Some(vec![("X-Request-ID", &request_id.to_string())]))
+                                .await;
+
+                            let response_time = request_start.elapsed();
+                            match result {
+                                Ok(response) => {
+                                    let status = response.status();
+                                    let status_code = Some(status.as_u16());
+
+                                    let req_res = if status.is_success() {
+                                        RequestResult {
+                                            request_id,
+                                            success: true,
+                                            status_code,
+                                            response_time_ms: response_time.as_millis(),
+                                            timestamp,
+                                            error_message: None,
+                                        }
+                                    } else {
+                                        RequestResult {
+                                            request_id,
+                                            success: false,
+                                            status_code,
+                                            response_time_ms: response_time.as_millis(),
+                                            timestamp,
+                                            error_message: Some(format!("HTTP错误: {}", status)),
+                                        }
+                                    };
+
+                                    // 写入 SQLite（task_uuid 不可用）
+                                    if let Err(e) = recorder_cloned
+                                        .insert_request(
+                                            chrono::Utc::now().timestamp(),
+                                            None,
+                                            req_res.request_id,
+                                            seq_in_second,
+                                            req_res.success,
+                                            req_res.error_message.clone(),
+                                        )
+                                        .await
+                                    {
+                                        eprintln!("写入 SQLite 失败: {}", e);
+                                    }
+
+                                    req_res
+                                }
+                                Err(e) => {
+                                    let req_res = RequestResult {
+                                        request_id,
+                                        success: false,
+                                        status_code: None,
+                                        response_time_ms: response_time.as_millis(),
+                                        timestamp,
+                                        error_message: Some(format!("请求错误: {}", e)),
+                                    };
+                                    // 写入 SQLite（task_uuid 不可用）
+                                    if let Err(e) = recorder_cloned
+                                        .insert_request(
+                                            chrono::Utc::now().timestamp(),
+                                            None,
+                                            req_res.request_id,
+                                            seq_in_second,
+                                            req_res.success,
+                                            req_res.error_message.clone(),
+                                        )
+                                        .await
+                                    {
+                                        eprintln!("写入 SQLite 失败: {}", e);
+                                    }
+                                    req_res
                                 }
                             }
-                        }
-                        Err(e) => RequestResult {
-                            request_id,
-                            success: false,
-                            status_code: None,
-                            response_time_ms: response_time.as_millis(),
-                            timestamp,
-                            error_message: Some(format!("请求错误: {}", e)),
-                        },
-                    }
+                        };
+
+                    // 任务返回 RequestResult
+                    request_result
                 });
 
                 second_requests += 1;
