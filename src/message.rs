@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -22,7 +23,7 @@ pub struct Message {
 }
 
 /// 消息接收/处理抽象（可注册不同 sink）
-#[async_trait::async_trait]
+#[async_trait]
 pub trait MessageSink: Send + Sync {
     async fn send(&self, msg: &Message) -> Result<(), Box<dyn Error + Send + Sync>>;
 }
