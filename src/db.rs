@@ -28,8 +28,8 @@ enum DbCommandType {
         task_uuid: Option<String>,
         request_id: Option<usize>,
         alarm_triggered: bool,
-        receive_time: Option<i64>,
-        alarm_time: Option<i64>,
+        receive_time: i64,
+        alarm_time: i64,
     },
 }
 
@@ -144,14 +144,10 @@ impl SqliteRecorder {
                                 let alarm_flag = if alarm_triggered { 1i32 } else { 0i32 };
                                 let mut params: Vec<&dyn rusqlite::ToSql> = vec![&alarm_flag];
 
-                                if let Some(rt) = &receive_time {
-                                    sql.push_str(", receive_time = ?");
-                                    params.push(rt);
-                                }
-                                if let Some(at) = &alarm_time {
-                                    sql.push_str(", alarm_time = ?");
-                                    params.push(at);
-                                }
+                                sql.push_str(", receive_time = ?");
+                                params.push(&receive_time);
+                                sql.push_str(", alarm_time = ?");
+                                params.push(&alarm_time);
 
                                 sql.push_str(" WHERE ");
                                 let mut conditions = Vec::new();
@@ -288,9 +284,9 @@ impl SqliteRecorder {
         &self,
         task_uuid: Option<String>,
         request_id: Option<usize>,
-        alarm_triggered: Option<bool>,
-        receive_time: Option<i64>,
-        alarm_time: Option<i64>,
+        alarm_triggered: bool,
+        receive_time: i64,
+        alarm_time: i64,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         if task_uuid.is_none() && request_id.is_none() {
             return Err("必须提供 task_uuid 或 request_id 其中之一".into());
@@ -316,7 +312,7 @@ impl SqliteRecorder {
             cmd_type: DbCommandType::UpdateAlarm {
                 task_uuid,
                 request_id,
-                alarm_triggered: alarm_triggered.unwrap_or(false),
+                alarm_triggered,
                 receive_time,
                 alarm_time,
             },
@@ -347,11 +343,9 @@ impl SqliteRecorder {
                 let mut hguard = self.worker_handle.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(handle) = hguard.take() {
                     println!("等待工作线程退出...");
-                    let _ = tokio::task::spawn_blocking(move || {
-                        if let Err(e) = handle.join() {
-                            eprintln!("工作线程退出时发生错误: {:?}", e);
-                        }
-                    }).await;
+                    if let Err(e) = handle.join() {
+                        eprintln!("工作线程退出时发生错误: {:?}", e);
+                    }
                 }
                 return;
             }
@@ -367,18 +361,9 @@ impl SqliteRecorder {
         };
         if let Some(handle) = hguard.take() {
             println!("等待数据库工作线程完成所有操作并退出...");
-            let _ = tokio::task::spawn_blocking(move || {
-                // 在阻塞线程中执行 join 操作，设置超时
-                let result = std::thread::spawn(move || {
-                    handle.join()
-                }).join();
-                
-                match result {
-                    Ok(Ok(_)) => println!("数据库工作线程已成功退出"),
-                    Ok(Err(e)) => eprintln!("工作线程退出时发生错误: {:?}", e),
-                    Err(_) => eprintln!("等待工作线程退出时发生 panic"),
-                }
-            }).await;
+            if let Err(e) = handle.join() {
+                eprintln!("工作线程退出时发生错误: {:?}", e);
+            }
         }
         println!("数据库连接已关闭");
     }
@@ -401,7 +386,7 @@ impl Drop for SqliteRecorder {
                 return;
             }
         };
-        
+
         if let Some(tx) = guard.take() {
             drop(tx); // Close the channel to signal worker thread to exit
         }
@@ -410,16 +395,14 @@ impl Drop for SqliteRecorder {
             Ok(g) => g,
             Err(e) => e.into_inner(),
         };
-        
+
         if let Some(handle) = hguard.take() {
             println!("等待工作线程完成并退出...");
             // 设置超时以防止无限期阻塞
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                handle.join()
-            })) {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle.join())) {
                 Ok(Ok(_)) => println!("工作线程已成功退出"),
                 Ok(Err(_)) => eprintln!("工作线程退出时发生错误"),
-                Err(_) => eprintln!("工作线程发生 panic")
+                Err(_) => eprintln!("工作线程发生 panic"),
             }
         }
         println!("数据库资源清理完成");
