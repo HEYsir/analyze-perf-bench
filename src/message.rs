@@ -13,6 +13,14 @@ pub enum MessageSource {
     Other(String),
 }
 
+/// 消息格式，预留 JSON / Protobuf / 其它
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MessageFormat {
+    Json,
+    Xml,
+    Unknown,
+}
+
 /// 统一的消息结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -20,6 +28,7 @@ pub struct Message {
     pub source: MessageSource,
     pub payload: Value,
     pub received_at: DateTime<Utc>,
+    pub format: Option<MessageFormat>, // 新增字段标识数据格式
 }
 
 /// 消息接收/处理抽象（可注册不同 sink）
