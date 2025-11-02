@@ -1,3 +1,4 @@
+use crate::db::SqliteRecorder;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -49,36 +50,39 @@ impl MessageProcessor {
             msg.id, msg.source, msg.received_at
         );
 
-        // 示例：根据来源做不同处理（占位）
-        match msg.source {
-            MessageSource::Http => {
-                // 当前只是打印，未来可以转发到持久化/索引/匹配模块
-                println!("HTTP 消息负载: {}", msg.payload);
-            }
-            MessageSource::Rmq => {
-                // TODO: RMQ sink integration
-                println!("RMQ 消息，预留处理");
-            }
-            MessageSource::Kafka => {
-                // TODO: Kafka sink integration
-                println!("Kafka 消息，预留处理");
-            }
-            MessageSource::Other(s) => {
-                println!("Other source: {}", s);
-            }
-        }
+        let payload = msg.payload;
+        let request_id = payload
+            .pointer("TaskInfo/picture/0/targetAttrs/request_id")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let task_uuid = payload
+            .pointer("TaskInfo/picture/0/targetAttrs/task_uuid")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let alarm_time = payload
+            .pointer("TaskInfo/alarm_time")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        println!(
+            "MessageProcessor: request_id={} task_uuid={}",
+            request_id, task_uuid
+        );
 
-        // 如果需要异步将消息推到其他模块 / 队列，可以在此调用已注册的 sinks。
+        // 克隆需要在异步块中使用的值
+        let task_uuid_clone = task_uuid.clone();
+        let msg_timestamp = msg.received_at.timestamp();
+
+        let recorder = SqliteRecorder::instance().await;
+        recorder
+            .update_alarm(
+                Some(task_uuid_clone),
+                Some(request_id as usize),
+                true,
+                msg_timestamp,
+                alarm_time,
+            )
+            .await;
         Ok(())
     }
 }
-
-// 占位：可以实现具体的 RMQ/Kafka sink，如下所示（示例接口，未实现）
-// pub struct RmqSink { /* connection params */ }
-// #[async_trait::async_trait]
-// impl MessageSink for RmqSink {
-//     async fn send(&self, msg: &Message) -> Result<(), Box<dyn Error + Send + Sync>> {
-//         // 实现将 msg 发送到 RMQ
-//         Ok(())
-//     }
-// }
