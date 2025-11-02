@@ -338,6 +338,7 @@ impl SqliteRecorder {
 
     /// 关闭后台线程（通过丢弃 sender 来让线程退出），并 join worker，确保后台线程已退出
     pub async fn shutdown(&self) {
+        println!("正在关闭数据库连接...");
         // 先取走 sender
         let mut guard = match self.cmd_sender.lock() {
             Ok(g) => g,
@@ -345,7 +346,12 @@ impl SqliteRecorder {
                 // 若 mutex 被污染，仍尝试取 worker handle
                 let mut hguard = self.worker_handle.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(handle) = hguard.take() {
-                    let _ = tokio::task::spawn_blocking(move || handle.join()).await;
+                    println!("等待工作线程退出...");
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if let Err(e) = handle.join() {
+                            eprintln!("工作线程退出时发生错误: {:?}", e);
+                        }
+                    }).await;
                 }
                 return;
             }
@@ -360,11 +366,62 @@ impl SqliteRecorder {
             Err(e) => e.into_inner(),
         };
         if let Some(handle) = hguard.take() {
+            println!("等待数据库工作线程完成所有操作并退出...");
             let _ = tokio::task::spawn_blocking(move || {
-                let _ = handle.join();
-            })
-            .await;
+                // 在阻塞线程中执行 join 操作，设置超时
+                let result = std::thread::spawn(move || {
+                    handle.join()
+                }).join();
+                
+                match result {
+                    Ok(Ok(_)) => println!("数据库工作线程已成功退出"),
+                    Ok(Err(e)) => eprintln!("工作线程退出时发生错误: {:?}", e),
+                    Err(_) => eprintln!("等待工作线程退出时发生 panic"),
+                }
+            }).await;
         }
-        // small sleep is unnecessary now because we joined the thread
+        println!("数据库连接已关闭");
+    }
+}
+
+impl Drop for SqliteRecorder {
+    fn drop(&mut self) {
+        // When the SqliteRecorder is dropped, attempt to shut down the worker thread
+        // This ensures that database resources are properly released when the program exits
+        println!("SqliteRecorder 正在被释放，开始清理数据库资源...");
+        let mut guard = match self.cmd_sender.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                // If the mutex is poisoned, try to join the worker handle anyway
+                let mut hguard = self.worker_handle.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(handle) = hguard.take() {
+                    println!("尝试加入工作线程（mutex 已损坏）...");
+                    let _ = handle.join();
+                }
+                return;
+            }
+        };
+        
+        if let Some(tx) = guard.take() {
+            drop(tx); // Close the channel to signal worker thread to exit
+        }
+
+        let mut hguard = match self.worker_handle.lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        
+        if let Some(handle) = hguard.take() {
+            println!("等待工作线程完成并退出...");
+            // 设置超时以防止无限期阻塞
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                handle.join()
+            })) {
+                Ok(Ok(_)) => println!("工作线程已成功退出"),
+                Ok(Err(_)) => eprintln!("工作线程退出时发生错误"),
+                Err(_) => eprintln!("工作线程发生 panic")
+            }
+        }
+        println!("数据库资源清理完成");
     }
 }
