@@ -268,8 +268,8 @@ impl ConcurrencyTestService {
                     request_result
                 });
                 second_requests += 1;
-                total_requests += 1;
             }
+            total_requests += config.requests_per_second;
 
             // 等待当前秒的所有请求完成
             let mut second_successful = 0;
