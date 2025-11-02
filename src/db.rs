@@ -16,13 +16,26 @@ pub struct SqliteRecorder {
     worker_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
+enum DbCommandType {
+    Insert {
+        ts_seconds: i64,
+        task_uuid: Option<String>,
+        request_id: usize,
+        seq_in_second: usize,
+        success: bool,
+        error_text: Option<String>,
+    },
+    UpdateAlarm {
+        task_uuid: Option<String>,
+        request_id: Option<usize>,
+        alarm_triggered: bool,
+        receive_time: Option<i64>,
+        alarm_time: Option<i64>,
+    },
+}
+
 struct DbCommand {
-    ts_seconds: i64,
-    task_uuid: Option<String>,
-    request_id: usize,
-    seq_in_second: usize,
-    success: bool,
-    error_text: Option<String>,
+    cmd_type: DbCommandType,
     resp: oneshot::Sender<Result<(), Box<dyn Error + Send + Sync>>>,
 }
 
@@ -72,7 +85,10 @@ impl SqliteRecorder {
                             request_id INTEGER NOT NULL,
                             seq_in_second INTEGER NOT NULL,
                             success INTEGER NOT NULL,
-                            error_text TEXT
+                            error_text TEXT,
+                            alarm_triggered INTEGER NOT NULL DEFAULT 0,
+                            receive_time INTEGER,
+                            alarm_time INTEGER
                         );
                         "#,
                     ) {
@@ -82,18 +98,64 @@ impl SqliteRecorder {
 
                     // 主循环：阻塞接收命令并在同一连接上执行插入
                     for cmd in rx {
-                        let res = conn.execute(
-                            "INSERT INTO request_records (ts_seconds, task_uuid, request_id, seq_in_second, success, error_text)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                            params![
-                                cmd.ts_seconds,
-                                cmd.task_uuid,
-                                cmd.request_id as i64,
-                                cmd.seq_in_second as i64,
-                                if cmd.success { 1 } else { 0 },
-                                cmd.error_text
-                            ],
-                        );
+                        let res = match cmd.cmd_type {
+                            DbCommandType::Insert {
+                                ts_seconds,
+                                task_uuid,
+                                request_id,
+                                seq_in_second,
+                                success,
+                                error_text,
+                            } => conn.execute(
+                                "INSERT INTO request_records (ts_seconds, task_uuid, request_id, seq_in_second, success, error_text)
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                                params![
+                                    ts_seconds,
+                                    task_uuid,
+                                    request_id as i64,
+                                    seq_in_second as i64,
+                                    if success { 1 } else { 0 },
+                                    error_text
+                                ],
+                            ),
+                            DbCommandType::UpdateAlarm {
+                                task_uuid,
+                                request_id,
+                                alarm_triggered,
+                                receive_time,
+                                alarm_time,
+                            } => {
+                                let mut sql = String::from("UPDATE request_records SET alarm_triggered = ?");
+                                // Create owned values that live long enough
+                                let alarm_flag = if alarm_triggered { 1i32 } else { 0i32 };
+                                let mut params: Vec<&dyn rusqlite::ToSql> = vec![&alarm_flag];
+                                let req_id_i64:i64;
+                                
+                                if let Some(rt) = &receive_time {
+                                    sql.push_str(", receive_time = ?");
+                                    params.push(rt);
+                                }
+                                if let Some(at) = &alarm_time {
+                                    sql.push_str(", alarm_time = ?");
+                                    params.push(at);
+                                }
+                                
+                                sql.push_str(" WHERE ");
+                                let mut conditions = Vec::new();
+                                if let Some(uuid) = &task_uuid {
+                                    conditions.push("task_uuid = ?");
+                                    params.push(uuid);
+                                }
+                                if let Some(rid) = &request_id {
+                                    req_id_i64 = *rid as i64;  // Create owned value
+                                    conditions.push("request_id = ?");
+                                    params.push(&req_id_i64);
+                                }
+                                sql.push_str(&conditions.join(" AND "));
+
+                                conn.execute(&sql, rusqlite::params_from_iter(params))
+                            }
+                        };
                         let send_res = match res {
                             Ok(_) => cmd.resp.send(Ok(())),
                             Err(e) => cmd.resp.send(Err(Box::new(e))),
@@ -181,12 +243,14 @@ impl SqliteRecorder {
 
         // 构造命令
         let cmd = DbCommand {
-            ts_seconds,
-            task_uuid,
-            request_id,
-            seq_in_second,
-            success,
-            error_text,
+            cmd_type: DbCommandType::Insert {
+                ts_seconds,
+                task_uuid,
+                request_id,
+                seq_in_second,
+                success,
+                error_text,
+            },
             resp: resp_tx,
         };
 
@@ -201,6 +265,61 @@ impl SqliteRecorder {
                     Err(_) => Err("等待后台 DB 响应超时".into()),
                 }
             }
+            Ok(Err(e)) => Err(format!("向后台线程发送命令失败: {}", e).into()),
+            Err(e) => Err(format!("发送命令时 spawn_blocking 出错: {}", e).into()),
+        }
+    }
+
+    /// 更新记录的报警相关字段
+    /// 可以通过 task_uuid 或 request_id 查找记录(至少需要提供一个)
+    /// 所有更新字段都是可选的，只更新提供的字段
+    pub async fn update_alarm(
+        &self,
+        task_uuid: Option<String>,
+        request_id: Option<usize>,
+        alarm_triggered: Option<bool>,
+        receive_time: Option<i64>,
+        alarm_time: Option<i64>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if task_uuid.is_none() && request_id.is_none() {
+            return Err("必须提供 task_uuid 或 request_id 其中之一".into());
+        }
+
+        // 获取 sender
+        let sender_opt = {
+            self.cmd_sender
+                .lock()
+                .map_err(|_| "cmd_sender mutex 被破坏")?
+                .clone()
+        };
+        let sender = match sender_opt {
+            Some(s) => s,
+            None => return Err("SqliteRecorder 未初始化，请先调用 init(path)".into()),
+        };
+
+        // 准备 oneshot 用于等待结果
+        let (resp_tx, resp_rx) = oneshot::channel();
+
+        // 构造更新命令
+        let cmd = DbCommand {
+            cmd_type: DbCommandType::UpdateAlarm {
+                task_uuid,
+                request_id,
+                alarm_triggered: alarm_triggered.unwrap_or(false),
+                receive_time,
+                alarm_time,
+            },
+            resp: resp_tx,
+        };
+
+        // 发送命令并等待结果
+        let send_result = tokio::task::spawn_blocking(move || sender.send(cmd)).await;
+        match send_result {
+            Ok(Ok(_)) => match tokio::time::timeout(Duration::from_secs(5), resp_rx).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => Err(format!("后台线程响应失败: {}", e).into()),
+                Err(_) => Err("等待后台 DB 响应超时".into()),
+            },
             Ok(Err(e)) => Err(format!("向后台线程发送命令失败: {}", e).into()),
             Err(e) => Err(format!("发送命令时 spawn_blocking 出错: {}", e).into()),
         }
