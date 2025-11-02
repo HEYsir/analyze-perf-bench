@@ -120,9 +120,7 @@ impl ConcurrencyTestService {
         let mut all_request_results = Vec::new();
 
         // 初始化 SQLite 记录器
-        let recorder = SqliteRecorder::new("requests.db");
-        recorder.init("requests.db").await?; // <- 传入路径参数，确保后台线程使用指定 DB 文件
-
+        let recorder = SqliteRecorder::instance().await;
         println!(
             "开始 {} 秒的并发测试，每秒 {} 个请求...",
             config.duration_seconds, config.requests_per_second

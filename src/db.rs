@@ -1,11 +1,10 @@
 use rusqlite::{Connection, params};
 use std::error::Error;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-
-use std::sync::mpsc::{self, Receiver, Sender};
-use tokio::sync::oneshot;
+use tokio::sync::{OnceCell, oneshot};
 
 /// 单一长连接的 SQLite 记录器：在单独的阻塞线程中持有 rusqlite::Connection，
 /// 通过 std::sync::mpsc 与该线程通信，insert_request 为异步接口通过 oneshot 等待结果。
@@ -39,17 +38,32 @@ struct DbCommand {
     resp: oneshot::Sender<Result<(), Box<dyn Error + Send + Sync>>>,
 }
 
+// 全局单例
+static RECORDER: OnceCell<SqliteRecorder> = OnceCell::const_new();
+
 impl SqliteRecorder {
     /// new 不会立即启动线程；调用 init() 来启动持久连接后台线程
-    pub fn new(_path: &str) -> Self {
+    pub fn new() -> Self {
         Self {
             cmd_sender: Arc::new(Mutex::new(None)),
             worker_handle: Arc::new(Mutex::new(None)),
         }
     }
 
+    /// 获取全局单例实例
+    pub async fn instance() -> &'static SqliteRecorder {
+        RECORDER
+            .get_or_init(|| {
+                let recorder = SqliteRecorder::new();
+                async move {
+                    recorder.init("requests.db").await.unwrap(); // 确保初始化
+                    recorder
+                }
+            })
+            .await
+    }
+
     /// 初始化并启动后台线程（创建 DB 文件与表）
-    /// 确保后台线程成功打开 DB，否则返回错误；线程启动使用一个短超时的 ready 通道确认。
     pub async fn init(&self, path: &str) -> Result<(), Box<dyn Error>> {
         // 更稳健地处理 mutex 中毒
         let mut guard = self
@@ -129,8 +143,7 @@ impl SqliteRecorder {
                                 // Create owned values that live long enough
                                 let alarm_flag = if alarm_triggered { 1i32 } else { 0i32 };
                                 let mut params: Vec<&dyn rusqlite::ToSql> = vec![&alarm_flag];
-                                let req_id_i64:i64;
-                                
+
                                 if let Some(rt) = &receive_time {
                                     sql.push_str(", receive_time = ?");
                                     params.push(rt);
@@ -139,7 +152,7 @@ impl SqliteRecorder {
                                     sql.push_str(", alarm_time = ?");
                                     params.push(at);
                                 }
-                                
+
                                 sql.push_str(" WHERE ");
                                 let mut conditions = Vec::new();
                                 if let Some(uuid) = &task_uuid {
@@ -147,9 +160,8 @@ impl SqliteRecorder {
                                     params.push(uuid);
                                 }
                                 if let Some(rid) = &request_id {
-                                    req_id_i64 = *rid as i64;  // Create owned value
                                     conditions.push("request_id = ?");
-                                    params.push(&req_id_i64);
+                                    params.push(rid);
                                 }
                                 sql.push_str(&conditions.join(" AND "));
 
@@ -214,7 +226,6 @@ impl SqliteRecorder {
     }
 
     /// 异步插入一条请求记录，使用后台线程的单一连接执行
-    /// 增加了对 mutex 中毒的保护和对后台响应的超时检测（默认 5 秒）。
     pub async fn insert_request(
         &self,
         ts_seconds: i64,
