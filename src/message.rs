@@ -44,6 +44,16 @@ pub struct MessageProcessor;
 impl MessageProcessor {
     /// 处理单条消息（异步）。未来可以在这里做路由、持久化、发送到 RMQ/Kafka 等。
     pub async fn process_message(msg: Message) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // 获取 SqliteRecorder 实例
+        let recorder = SqliteRecorder::instance().await;
+        Self::process_message_with_recorder(msg, &recorder).await
+    }
+
+    /// 使用预获取的 SqliteRecorder 实例处理消息，避免在异步块内部 await
+    pub async fn process_message_with_recorder(
+        msg: Message,
+        recorder: &SqliteRecorder,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // 简单记录
         println!(
             "MessageProcessor: received message id={} source={:?} at={}",
@@ -73,8 +83,7 @@ impl MessageProcessor {
         let task_uuid_clone = task_uuid.clone();
         let msg_timestamp = msg.received_at.timestamp();
 
-        let recorder = SqliteRecorder::instance().await;
-        recorder
+        let _ = recorder
             .update_alarm(
                 Some(task_uuid_clone),
                 Some(request_id as usize),

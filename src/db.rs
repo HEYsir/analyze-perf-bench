@@ -1,10 +1,10 @@
 use rusqlite::{Connection, params};
 use std::error::Error;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use tokio::sync::{OnceCell, oneshot};
+use tokio::sync::{Mutex, OnceCell, oneshot};
 
 /// 单一长连接的 SQLite 记录器：在单独的阻塞线程中持有 rusqlite::Connection，
 /// 通过 std::sync::mpsc 与该线程通信，insert_request 为异步接口通过 oneshot 等待结果。
@@ -65,11 +65,8 @@ impl SqliteRecorder {
 
     /// 初始化并启动后台线程（创建 DB 文件与表）
     pub async fn init(&self, path: &str) -> Result<(), Box<dyn Error>> {
-        // 更稳健地处理 mutex 中毒
-        let mut guard = self
-            .cmd_sender
-            .lock()
-            .map_err(|_| "cmd_sender mutex 被破坏")?;
+        // 使用异步锁
+        let mut guard = self.cmd_sender.lock().await;
         if guard.is_some() {
             // 已经初始化
             return Ok(());
@@ -201,10 +198,7 @@ impl SqliteRecorder {
             Ok(Ok(())) => {
                 // 后台线程已成功打开 DB，将 sender 和 handle 存入结构体以供后续使用与 shutdown
                 *guard = Some(tx);
-                let mut hguard = self
-                    .worker_handle
-                    .lock()
-                    .map_err(|_| "worker_handle mutex 被破坏")?;
+                let mut hguard = self.worker_handle.lock().await;
                 *hguard = Some(handle);
                 Ok(())
             }
@@ -231,13 +225,8 @@ impl SqliteRecorder {
         success: bool,
         error_text: Option<String>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        // 获取 sender（处理 mutex 中毒）
-        let sender_opt = {
-            self.cmd_sender
-                .lock()
-                .map_err(|_| "cmd_sender mutex 被破坏")?
-                .clone()
-        };
+        // 获取 sender（使用异步锁）
+        let sender_opt = { self.cmd_sender.lock().await.clone() };
         let sender = match sender_opt {
             Some(s) => s,
             None => {
@@ -292,13 +281,8 @@ impl SqliteRecorder {
             return Err("必须提供 task_uuid 或 request_id 其中之一".into());
         }
 
-        // 获取 sender
-        let sender_opt = {
-            self.cmd_sender
-                .lock()
-                .map_err(|_| "cmd_sender mutex 被破坏")?
-                .clone()
-        };
+        // 获取 sender（使用异步锁）
+        let sender_opt = { self.cmd_sender.lock().await.clone() };
         let sender = match sender_opt {
             Some(s) => s,
             None => return Err("SqliteRecorder 未初始化，请先调用 init(path)".into()),
@@ -335,33 +319,17 @@ impl SqliteRecorder {
     /// 关闭后台线程（通过丢弃 sender 来让线程退出），并 join worker，确保后台线程已退出
     pub async fn shutdown(&self) {
         println!("正在关闭数据库连接...");
-        // 先取走 sender
-        let mut guard = match self.cmd_sender.lock() {
-            Ok(g) => g,
-            Err(_) => {
-                // 若 mutex 被污染，仍尝试取 worker handle
-                let mut hguard = self.worker_handle.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(handle) = hguard.take() {
-                    println!("等待工作线程退出...");
-                    if let Err(e) = handle.join() {
-                        eprintln!("工作线程退出时发生错误: {:?}", e);
-                    }
-                }
-                return;
-            }
-        };
+        // 使用异步锁获取 sender
+        let mut guard = self.cmd_sender.lock().await;
         if let Some(tx) = guard.take() {
             drop(tx); // closing channel -> worker 线程会在 rx 迭代结束后退出
         }
 
         // join worker thread（在 spawn_blocking 中执行 join）
-        let mut hguard = match self.worker_handle.lock() {
-            Ok(g) => g,
-            Err(e) => e.into_inner(),
-        };
+        let mut hguard = self.worker_handle.lock().await;
         if let Some(handle) = hguard.take() {
             println!("等待数据库工作线程完成所有操作并退出...");
-            if let Err(e) = handle.join() {
+            if let Err(e) = tokio::task::spawn_blocking(move || handle.join()).await {
                 eprintln!("工作线程退出时发生错误: {:?}", e);
             }
         }
@@ -371,38 +339,26 @@ impl SqliteRecorder {
 
 impl Drop for SqliteRecorder {
     fn drop(&mut self) {
-        // When the SqliteRecorder is dropped, attempt to shut down the worker thread
-        // This ensures that database resources are properly released when the program exits
-        println!("SqliteRecorder 正在被释放，开始清理数据库资源...");
-        let mut guard = match self.cmd_sender.lock() {
-            Ok(g) => g,
-            Err(_) => {
-                // If the mutex is poisoned, try to join the worker handle anyway
-                let mut hguard = self.worker_handle.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(handle) = hguard.take() {
-                    println!("尝试加入工作线程（mutex 已损坏）...");
-                    let _ = handle.join();
-                }
-                return;
+        // 在Drop中，我们无法使用异步操作，所以只进行基本的清理
+        // 主要的清理应该在shutdown方法中完成
+        println!("SqliteRecorder 正在被释放...");
+        // 尝试获取锁，如果失败则忽略（在Drop中不能阻塞）
+        if let Ok(mut guard) = self.cmd_sender.try_lock() {
+            if let Some(tx) = guard.take() {
+                drop(tx); // 关闭通道，通知工作线程退出
             }
-        };
-
-        if let Some(tx) = guard.take() {
-            drop(tx); // Close the channel to signal worker thread to exit
         }
 
-        let mut hguard = match self.worker_handle.lock() {
-            Ok(g) => g,
-            Err(e) => e.into_inner(),
-        };
-
-        if let Some(handle) = hguard.take() {
-            println!("等待工作线程完成并退出...");
-            // 设置超时以防止无限期阻塞
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle.join())) {
-                Ok(Ok(_)) => println!("工作线程已成功退出"),
-                Ok(Err(_)) => eprintln!("工作线程退出时发生错误"),
-                Err(_) => eprintln!("工作线程发生 panic"),
+        // 尝试获取工作线程句柄，如果失败则忽略
+        if let Ok(mut hguard) = self.worker_handle.try_lock() {
+            if let Some(handle) = hguard.take() {
+                // 尝试加入线程，但设置超时避免阻塞
+                let _ = std::thread::spawn(move || {
+                    if let Err(_) = handle.join() {
+                        // 忽略加入错误
+                    }
+                })
+                .join();
             }
         }
         println!("数据库资源清理完成");

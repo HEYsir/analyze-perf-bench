@@ -133,8 +133,12 @@ impl HttpServerService {
             received_at: chrono::Utc::now(),
             format: Some(msg_format),
         };
+
+        // 提前获取 SqliteRecorder 实例，避免在异步块内部 await
+        let recorder = crate::db::SqliteRecorder::instance().await;
+
         tokio::spawn(async move {
-            if let Err(e) = MessageProcessor::process_message(msg).await {
+            if let Err(e) = MessageProcessor::process_message_with_recorder(msg, &recorder).await {
                 eprintln!("Message processing error: {}", e);
             }
         });
