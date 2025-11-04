@@ -18,7 +18,7 @@ md-5 = "0.10"
 hex = "0.4"
 digest_auth = "0.3.1"  # 添加成熟的Digest认证库
 anyhow = "1.0"  # 添加anyhow库用于错误处理
-rusqlite = "0.29" # <-- 新增：SQLite 依赖，用于记录请求
+rusqlite = { version = "0.29", features = ["bundled"] } # <-- 使用bundled SQLite功能
 async-trait = "0.1.89"
 quick-xml = { version = "0.31", features = ["serialize", "overlapped-lists"] }
 bytes = "1.10.1"

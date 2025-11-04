@@ -53,12 +53,10 @@ impl SqliteRecorder {
     /// 获取全局单例实例
     pub async fn instance() -> &'static SqliteRecorder {
         RECORDER
-            .get_or_init(|| {
-                let recorder = SqliteRecorder::new();
-                async move {
-                    recorder.init("requests.db").await.unwrap(); // 确保初始化
-                    recorder
-                }
+            .get_or_init(|| async {
+                let mut recorder = SqliteRecorder::new();
+                recorder.init("requests.db").await.unwrap(); // 确保初始化
+                recorder
             })
             .await
     }

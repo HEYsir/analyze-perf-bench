@@ -119,8 +119,6 @@ impl ConcurrencyTestService {
         let mut failed_requests = 0;
         let mut all_request_results = Vec::new();
 
-        // 初始化 SQLite 记录器
-        let recorder = SqliteRecorder::instance().await;
         println!(
             "开始 {} 秒的并发测试，每秒 {} 个请求...",
             config.duration_seconds, config.requests_per_second
@@ -149,9 +147,8 @@ impl ConcurrencyTestService {
                 let request_id = total_requests + i + 1;
                 let seq_in_second = i + 1;
 
-                // 为每个任务准备要移动/克隆的值，避免在 async move 中多次移动同一值或共享可变数据
+                // 为每个任务准备要移动的值，避免在 async move 中多次移动同一值或共享可变数据
                 let mut json_clone = base_json.clone();
-                let recorder_cloned = recorder.clone();
 
                 join_set.spawn(async move {
                     let timestamp = chrono::Utc::now().to_rfc3339();
@@ -177,7 +174,8 @@ impl ConcurrencyTestService {
                                 error_message: Some(format!("修改报文失败: {}", e)),
                             };
                             // 将记录写入 SQLite（非阻塞）
-                            if let Err(e) = recorder_cloned
+                            if let Err(e) = SqliteRecorder::instance()
+                                .await
                                 .insert_request(
                                     ts_seconds,
                                     Some(task_uuid),
@@ -250,7 +248,8 @@ impl ConcurrencyTestService {
                     };
 
                     // 将记录写入 SQLite（非阻塞）
-                    if let Err(e) = recorder_cloned
+                    if let Err(e) = SqliteRecorder::instance()
+                        .await
                         .insert_request(
                             ts_seconds,
                             task_uuid_for_db,
