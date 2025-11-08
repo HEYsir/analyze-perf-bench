@@ -79,7 +79,7 @@ impl HttpServerService {
         println!("HTTP 服务器已启动，监听端口 {}", port);
         println!("按 Ctrl+C 停止服务器");
 
-        warp::serve(routes).run(([127, 0, 0, 1], port)).await;
+        warp::serve(routes).run(([0, 0, 0, 0], port)).await;
         Ok(())
     }
 
