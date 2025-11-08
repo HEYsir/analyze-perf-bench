@@ -62,16 +62,16 @@ impl MessageProcessor {
 
         let payload = msg.payload;
         let request_id = payload
-            .pointer("TaskInfo/picture/0/targetAttrs/request_id")
+            .pointer("/analysisResult/0/targetAttrs/request_id")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
         let task_uuid = payload
-            .pointer("TaskInfo/picture/0/targetAttrs/task_uuid")
+            .pointer("/analysisResult/0/targetAttrs/task_uuid")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_default();
         let alarm_time = payload
-            .pointer("TaskInfo/alarm_time")
+            .pointer("/analysisResult/0/timeStamp")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
         println!(
