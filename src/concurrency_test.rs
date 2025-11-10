@@ -28,7 +28,9 @@ impl Default for ConcurrencyConfig {
 /// 请求结果详细记录
 #[derive(Debug, serde::Serialize, Clone)]
 pub struct RequestResult {
+    pub task_uuid: Option<String>,
     pub request_id: usize,
+    pub seq_in_second: usize,
     pub success: bool,
     pub status_code: Option<u16>,
     pub response_time_ms: u128,
@@ -138,7 +140,6 @@ impl ConcurrencyTestService {
         };
         while start_time.elapsed().as_secs() < config.duration_seconds {
             let second_start = Instant::now();
-            let mut second_requests = 0;
 
             // 创建当前秒的所有并发任务并加入 JoinSet
             for i in 0..config.requests_per_second {
@@ -164,31 +165,7 @@ impl ConcurrencyTestService {
                     ) {
                         Ok(v) => v,
                         Err(e) => {
-                            // 如果修改报文失败，直接返回一个失败的 RequestResult，避免将 Box<dyn Error> 传递出任务
-                            let request_result = RequestResult {
-                                request_id,
-                                success: false,
-                                status_code: None,
-                                response_time_ms: 0,
-                                timestamp,
-                                error_message: Some(format!("修改报文失败: {}", e)),
-                            };
-                            // 将记录写入 SQLite（非阻塞）
-                            if let Err(e) = SqliteRecorder::instance()
-                                .await
-                                .insert_request(
-                                    ts_seconds,
-                                    Some(task_uuid),
-                                    request_result.request_id,
-                                    seq_in_second,
-                                    request_result.success,
-                                    request_result.error_message.clone(),
-                                )
-                                .await
-                            {
-                                eprintln!("写入 SQLite 失败: {}", e);
-                            }
-                            return request_result;
+                            panic!("{}", format!("修改报文失败: {}", e));
                         }
                     };
 
@@ -197,54 +174,35 @@ impl ConcurrencyTestService {
                     let result = client.post_json(&url, &body_out, None).await;
                     let response_time = request_start.elapsed();
 
-                    let (request_result, task_uuid_for_db) = match result {
+                    let request_result = match result {
                         Ok(response) => {
                             let status = response.status();
                             let status_code = Some(status.as_u16());
-
-                            if status.is_success() {
-                                // 尝试获取响应体中的 request_id 进行验证（不强制使用）
-                                let _response_body = match response.text().await {
-                                    Ok(text) => Some(text),
-                                    Err(_) => None,
-                                };
-
-                                (
-                                    RequestResult {
-                                        request_id,
-                                        success: true,
-                                        status_code,
-                                        response_time_ms: response_time.as_millis(),
-                                        timestamp,
-                                        error_message: None,
-                                    },
-                                    Some(task_uuid),
-                                )
-                            } else {
-                                (
-                                    RequestResult {
-                                        request_id,
-                                        success: false,
-                                        status_code,
-                                        response_time_ms: response_time.as_millis(),
-                                        timestamp,
-                                        error_message: Some(format!("HTTP错误: {}", status)),
-                                    },
-                                    Some(task_uuid),
-                                )
-                            }
-                        }
-                        Err(e) => (
                             RequestResult {
+                                task_uuid: Some(task_uuid),
                                 request_id,
-                                success: false,
-                                status_code: None,
+                                seq_in_second,
+                                success: status.is_success(),
+                                status_code,
                                 response_time_ms: response_time.as_millis(),
                                 timestamp,
-                                error_message: Some(format!("请求错误: {}", e)),
-                            },
-                            None,
-                        ),
+                                error_message: if status.is_success() {
+                                    Some("success".to_string())
+                                } else {
+                                    Some(format!("HTTP错误: {}", status))
+                                },
+                            }
+                        }
+                        Err(e) => RequestResult {
+                            task_uuid: Some(task_uuid),
+                            request_id,
+                            seq_in_second,
+                            success: false,
+                            status_code: None,
+                            response_time_ms: response_time.as_millis(),
+                            timestamp,
+                            error_message: Some(format!("请求错误: {}", e)),
+                        },
                     };
 
                     // 将记录写入 SQLite（非阻塞）
@@ -252,9 +210,9 @@ impl ConcurrencyTestService {
                         .await
                         .insert_request(
                             ts_seconds,
-                            task_uuid_for_db,
+                            request_result.task_uuid.clone(),
                             request_result.request_id,
-                            seq_in_second,
+                            request_result.seq_in_second,
                             request_result.success,
                             request_result.error_message.clone(),
                         )
@@ -266,82 +224,8 @@ impl ConcurrencyTestService {
                     // 任务返回 RequestResult
                     request_result
                 });
-                second_requests += 1;
             }
             total_requests += config.requests_per_second;
-
-            // 等待当前秒的所有请求完成
-            let mut second_successful = 0;
-            let mut second_failed = 0;
-            let mut second_results = Vec::new();
-
-            // 收集当前秒的请求结果
-            for _ in 0..second_requests {
-                if let Some(result) = join_set.join_next().await {
-                    match result {
-                        Ok(request_result) => {
-                            if request_result.success {
-                                second_successful += 1;
-                                successful_requests += 1;
-                            } else {
-                                second_failed += 1;
-                                failed_requests += 1;
-                            }
-
-                            let result_clone = request_result.clone();
-                            all_request_results.push(result_clone.clone());
-                            second_results.push(result_clone.clone());
-
-                            // 每10个请求打印一次详细结果
-                            if request_result.request_id % 10 == 0 {
-                                println!(
-                                    "请求 {}: {} - 响应时间: {}ms",
-                                    request_result.request_id,
-                                    if request_result.success {
-                                        "成功"
-                                    } else {
-                                        "失败"
-                                    },
-                                    request_result.response_time_ms
-                                );
-                            }
-                        }
-                        Err(_) => {
-                            second_failed += 1;
-                            failed_requests += 1;
-                            // 创建错误结果记录
-                            let error_result = RequestResult {
-                                request_id: total_requests,
-                                success: false,
-                                status_code: None,
-                                response_time_ms: 0,
-                                timestamp: chrono::Utc::now().to_rfc3339(),
-                                error_message: Some("任务执行错误".to_string()),
-                            };
-                            all_request_results.push(error_result);
-                        }
-                    }
-                }
-            }
-
-            // 打印当前秒的统计
-            let avg_response_time: u128 = if !second_results.is_empty() {
-                second_results
-                    .iter()
-                    .map(|r| r.response_time_ms)
-                    .sum::<u128>()
-                    / second_results.len() as u128
-            } else {
-                0
-            };
-
-            println!(
-                "第 {} 秒: 成功 {} / 失败 {} 请求, 平均响应时间: {}ms",
-                start_time.elapsed().as_secs() + 1,
-                second_successful,
-                second_failed,
-                avg_response_time
-            );
 
             // 等待到下一秒开始
             let elapsed = second_start.elapsed();
@@ -349,16 +233,19 @@ impl ConcurrencyTestService {
                 sleep(Duration::from_secs(1) - elapsed).await;
             }
         }
-
-        // 确保所有任务都已完成
         while let Some(result) = join_set.join_next().await {
-            if let Ok(request_result) = result {
-                if request_result.success {
-                    successful_requests += 1;
-                } else {
-                    failed_requests += 1;
+            match result {
+                Ok(request_result) => {
+                    if request_result.success {
+                        successful_requests += 1;
+                    } else {
+                        failed_requests += 1;
+                    }
+                    all_request_results.push(request_result);
                 }
-                all_request_results.push(request_result);
+                Err(_) => {
+                    println!("任务执行错误");
+                }
             }
         }
 
@@ -423,9 +310,58 @@ impl ConcurrencyTestService {
         println!("预期请求数: {}", result.summary.expected_requests);
         println!("完成率: {:.2}%", result.summary.completion_rate);
 
-        // 打印前10个请求的详细结果作为示例
-        println!("\n=== 前10个请求的详细结果 ===");
-        for result in result.detailed_results.iter().take(10) {
+        // 一次性输出所有请求的统计摘要
+        println!("\n=== 请求统计摘要 ===");
+        if !result.detailed_results.is_empty() {
+            let success_count = result.detailed_results.iter().filter(|r| r.success).count();
+            let failure_count = result.detailed_results.len() - success_count;
+            println!(
+                "总请求: {} (成功: {}, 失败: {})",
+                result.detailed_results.len(),
+                success_count,
+                failure_count
+            );
+
+            // 按状态码分组统计
+            use std::collections::HashMap;
+            let mut status_counts: HashMap<Option<u16>, usize> = HashMap::new();
+            for result in &result.detailed_results {
+                *status_counts.entry(result.status_code).or_insert(0) += 1;
+            }
+
+            println!("状态码分布:");
+            for (status_code, count) in status_counts {
+                let status_str = match status_code {
+                    Some(code) => format!("{}", code),
+                    None => "无状态码".to_string(),
+                };
+                println!("  {}: {} 个请求", status_str, count);
+            }
+
+            // 响应时间分布
+            let response_times: Vec<u128> = result
+                .detailed_results
+                .iter()
+                .map(|r| r.response_time_ms)
+                .collect();
+
+            if !response_times.is_empty() {
+                let p50 = Self::percentile(&response_times, 0.5);
+                let p90 = Self::percentile(&response_times, 0.9);
+                let p95 = Self::percentile(&response_times, 0.95);
+                let p99 = Self::percentile(&response_times, 0.99);
+
+                println!("响应时间分位数:");
+                println!("  P50: {}ms", p50);
+                println!("  P90: {}ms", p90);
+                println!("  P95: {}ms", p95);
+                println!("  P99: {}ms", p99);
+            }
+        }
+
+        // 只显示前5个请求的详细结果作为示例
+        println!("\n=== 前5个请求的详细结果（示例） ===");
+        for result in result.detailed_results.iter().take(5) {
             println!(
                 "请求 {}: {} - 状态码: {:?} - 响应时间: {}ms",
                 result.request_id,
@@ -434,6 +370,17 @@ impl ConcurrencyTestService {
                 result.response_time_ms
             );
         }
+    }
+
+    /// 计算百分位数
+    fn percentile(data: &[u128], percentile: f64) -> u128 {
+        if data.is_empty() {
+            return 0;
+        }
+        let mut sorted = data.to_vec();
+        sorted.sort();
+        let index = (percentile * (sorted.len() - 1) as f64).round() as usize;
+        sorted[index]
     }
 }
 

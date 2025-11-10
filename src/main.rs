@@ -67,10 +67,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 配置并发请求参数
     let _concurrency_config = config_manager.create_concurrency_config();
     let test_config = HMSClipTest_rs::concurrency_test::ConcurrencyConfig {
-        requests_per_second: 2, // 测试时使用较小的并发数
-        duration_seconds: 2,    // 测试时使用较短的持续时间
-        url: "http://10.41.131.102/ISAPI/Intelligent/AIOpenPlatform/pictureTask?format=json"
-            .to_string(),
+        requests_per_second: 1, // 测试时使用较小的并发数
+        duration_seconds: 1,    // 测试时使用较短的持续时间
+        url: "https://10.41.131.103/ISAPI/SDT/Management/Task/Picture?format=json".to_string(),
     };
 
     println!("并发请求配置: {:?}", test_config);

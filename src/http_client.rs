@@ -93,10 +93,8 @@ impl HttpClientService {
             return Ok(response);
         }
 
-        println!("检测到 401 认证失败，处理认证...");
         // 处理认证
         let auth_string = self.get_auth(response, url, "POST").await?;
-        println!("生成的认证头: {}", auth_string);
 
         // 重新发送认证请求
         let request = request.header("Authorization", auth_string);
@@ -177,7 +175,7 @@ impl HttpClientService {
             anyhow!(error_msg)
         })?;
 
-        println!("生成的 Digest 认证头: {}", auth_response);
+        // println!("生成的 Digest 认证头: {}", auth_response);
         Ok(auth_response.to_string())
     }
 }

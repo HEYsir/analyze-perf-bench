@@ -61,7 +61,7 @@ impl SqliteRecorder {
     pub async fn instance() -> &'static SqliteRecorder {
         RECORDER
             .get_or_init(|| async {
-                let mut recorder = SqliteRecorder::new();
+                let recorder = SqliteRecorder::new();
                 recorder.init("requests.db").await.unwrap(); // 确保初始化
                 recorder
             })
@@ -395,7 +395,6 @@ impl SqliteRecorder {
             Err(e) => Err(format!("发送命令时 spawn_blocking 出错: {}", e).into()),
         }
     }
-
 
     /// 关闭后台线程（通过丢弃 sender 来让线程退出），并 join worker，确保后台线程已退出
     pub async fn shutdown(&self) {
