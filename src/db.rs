@@ -31,6 +31,13 @@ enum DbCommandType {
         receive_time: i64,
         alarm_time: i64,
     },
+    InsertMessage {
+        request_id: u64,
+        task_uuid: Option<String>,
+        event_type: String,
+        receive_time: i64,
+        alarm_time: i64,
+    },
 }
 
 struct DbCommand {
@@ -99,6 +106,15 @@ impl SqliteRecorder {
                             receive_time INTEGER,
                             alarm_time INTEGER
                         );
+                        CREATE TABLE IF NOT EXISTS message_records (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            request_id INTEGER NOT NULL,
+                            task_uuid TEXT,
+                            event_type TEXT NOT NULL,
+                            receive_time INTEGER NOT NULL,
+                            alarm_time INTEGER NOT NULL,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                        );
                         "#,
                     ) {
                         eprintln!("初始化 SQLite 表失败: {}", e);
@@ -158,6 +174,23 @@ impl SqliteRecorder {
 
                                 conn.execute(&sql, rusqlite::params_from_iter(params))
                             }
+                            DbCommandType::InsertMessage {
+                                request_id,
+                                task_uuid,
+                                event_type,
+                                receive_time,
+                                alarm_time,
+                            } => conn.execute(
+                                "INSERT INTO message_records (request_id, task_uuid, event_type, receive_time, alarm_time)
+                                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                                params![
+                                    request_id as i64,
+                                    task_uuid,
+                                    event_type,
+                                    receive_time,
+                                    alarm_time
+                                ],
+                            ),
                         };
                         let send_res = match res {
                             Ok(_) => cmd.resp.send(Ok(())),
@@ -313,6 +346,56 @@ impl SqliteRecorder {
             Err(e) => Err(format!("发送命令时 spawn_blocking 出错: {}", e).into()),
         }
     }
+
+    /// 插入消息记录到新的数据表
+    pub async fn insert_message(
+        &self,
+        request_id: u64,
+        task_uuid: Option<String>,
+        event_type: String,
+        receive_time: i64,
+        alarm_time: i64,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // 获取 sender（使用异步锁）
+        let sender_opt = { self.cmd_sender.lock().await.clone() };
+        let sender = match sender_opt {
+            Some(s) => s,
+            None => {
+                return Err(format!("SqliteRecorder 未初始化，请先调用 init(path)").into());
+            }
+        };
+
+        // 准备 oneshot 用于等待结果
+        let (resp_tx, resp_rx) = oneshot::channel::<Result<(), Box<dyn Error + Send + Sync>>>();
+
+        // 构造命令
+        let cmd = DbCommand {
+            cmd_type: DbCommandType::InsertMessage {
+                request_id,
+                task_uuid,
+                event_type,
+                receive_time,
+                alarm_time,
+            },
+            resp: resp_tx,
+        };
+
+        // sender.send 是阻塞的短操作：放入 spawn_blocking 避免在 async runtime 中阻塞
+        let send_result = tokio::task::spawn_blocking(move || sender.send(cmd)).await;
+        match send_result {
+            Ok(Ok(_)) => {
+                // 等待 worker 执行并通过 oneshot 返回结果，添加超时以避免永久等待
+                match tokio::time::timeout(Duration::from_secs(5), resp_rx).await {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(e)) => Err(format!("后台线程响应失败: {}", e).into()),
+                    Err(_) => Err("等待后台 DB 响应超时".into()),
+                }
+            }
+            Ok(Err(e)) => Err(format!("向后台线程发送命令失败: {}", e).into()),
+            Err(e) => Err(format!("发送命令时 spawn_blocking 出错: {}", e).into()),
+        }
+    }
+
 
     /// 关闭后台线程（通过丢弃 sender 来让线程退出），并 join worker，确保后台线程已退出
     pub async fn shutdown(&self) {

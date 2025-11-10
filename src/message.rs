@@ -61,6 +61,12 @@ impl MessageProcessor {
         );
 
         let payload = msg.payload;
+        // 获取 event_type 字段
+        let event_type = payload
+            .pointer("/eventType")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
         let request_id = payload
             .pointer("/analysisResult/0/targetAttrs/request_id")
             .and_then(|v| v.as_u64())
@@ -74,18 +80,29 @@ impl MessageProcessor {
             .pointer("/analysisResult/0/timeStamp")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
-        println!(
-            "MessageProcessor: request_id={} task_uuid={}",
-            request_id, task_uuid
-        );
 
-        // 克隆需要在异步块中使用的值
-        let task_uuid_clone = task_uuid.clone();
         let msg_timestamp = msg.received_at.timestamp();
 
+        println!(
+            "MessageProcessor: request_id={} task_uuid={} event_type={}",
+            request_id, task_uuid, event_type
+        );
+
+        // 将消息记录存储到新的数据表
+        let _ = recorder
+            .insert_message(
+                request_id,
+                Some(task_uuid.clone()),
+                event_type,
+                msg_timestamp,
+                alarm_time,
+            )
+            .await;
+
+        // 同时保持原有的报警更新逻辑
         let _ = recorder
             .update_alarm(
-                Some(task_uuid_clone),
+                Some(task_uuid),
                 Some(request_id as usize),
                 true,
                 msg_timestamp,
