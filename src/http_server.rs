@@ -1,3 +1,4 @@
+use crate::db_adapter::{DbRecorder, get_recorder}; // 使用批量写入适配器
 use crate::message::{Message, MessageFormat, MessageProcessor, MessageSource};
 use bytes::Bytes;
 use quick_xml::de::from_str as xml_from_str;
@@ -134,11 +135,11 @@ impl HttpServerService {
             format: Some(msg_format),
         };
 
-        // 提前获取 SqliteRecorder 实例，避免在异步块内部 await
-        let recorder = crate::db::SqliteRecorder::instance().await;
+        // 提前获取 DbRecorder 实例，避免在异步块内部 await
+        let recorder = get_recorder().await;
 
         tokio::spawn(async move {
-            if let Err(e) = MessageProcessor::process_message_with_recorder(msg, &recorder).await {
+            if let Err(e) = MessageProcessor::process_message_with_recorder(msg, recorder).await {
                 eprintln!("Message processing error: {}", e);
             }
         });

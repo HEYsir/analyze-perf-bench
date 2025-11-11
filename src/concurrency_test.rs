@@ -1,4 +1,4 @@
-use crate::db::SqliteRecorder; // <-- 新增导入
+use crate::db_adapter::{DbRecorder, get_recorder}; // 使用批量写入适配器
 use crate::http_client::HttpClientService;
 use crate::json_processor::JsonProcessor;
 use serde_json::Value;
@@ -205,9 +205,9 @@ impl ConcurrencyTestService {
                         },
                     };
 
-                    // 将记录写入 SQLite（非阻塞）
-                    if let Err(e) = SqliteRecorder::instance()
-                        .await
+                    // 将记录写入 SQLite（使用批量写入）
+                    let recorder = get_recorder().await;
+                    if let Err(e) = recorder
                         .insert_request(
                             ts_seconds,
                             request_result.task_uuid.clone(),

@@ -1,4 +1,4 @@
-use crate::db::SqliteRecorder;
+use crate::db_adapter::{DbRecorder, get_recorder}; // 使用批量写入适配器
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -44,21 +44,21 @@ pub struct MessageProcessor;
 impl MessageProcessor {
     /// 处理单条消息（异步）。未来可以在这里做路由、持久化、发送到 RMQ/Kafka 等。
     pub async fn process_message(msg: Message) -> Result<(), Box<dyn Error + Send + Sync>> {
-        // 获取 SqliteRecorder 实例
-        let recorder = SqliteRecorder::instance().await;
-        Self::process_message_with_recorder(msg, &recorder).await
+        // 获取 DbRecorder 实例（使用批量写入）
+        let recorder = get_recorder().await;
+        Self::process_message_with_recorder(msg, recorder).await
     }
 
-    /// 使用预获取的 SqliteRecorder 实例处理消息，避免在异步块内部 await
+    /// 使用预获取的 DbRecorder 实例处理消息，避免在异步块内部 await
     pub async fn process_message_with_recorder(
         msg: Message,
-        recorder: &SqliteRecorder,
+        recorder: &DbRecorder,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // 简单记录
-        println!(
-            "MessageProcessor: received message id={} source={:?} at={}",
-            msg.id, msg.source, msg.received_at
-        );
+        // println!(
+        //     "MessageProcessor: received message id={} source={:?} at={}",
+        //     msg.id, msg.source, msg.received_at
+        // );
 
         let payload = msg.payload;
         // 获取 event_type 字段
@@ -101,12 +101,12 @@ impl MessageProcessor {
 
         let msg_timestamp = msg.received_at.timestamp();
 
-        println!(
-            "MessageProcessor: request_id={} task_uuid={} event_type={}",
-            request_id, task_uuid, event_type
-        );
+        // println!(
+        //     "MessageProcessor: request_id={} task_uuid={} event_type={}",
+        //     request_id, task_uuid, event_type
+        // );
 
-        // 将消息记录存储到新的数据表
+        // 将消息记录存储到新的数据表（使用批量写入）
         let _ = recorder
             .insert_message(
                 request_id,

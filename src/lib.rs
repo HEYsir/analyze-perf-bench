@@ -10,6 +10,8 @@
 pub mod concurrency_test;
 pub mod config;
 pub mod db;
+pub mod db_adapter; // 新增数据库适配器模块
+pub mod db_batch; // 新增批量写入模块
 pub mod http_client;
 pub mod http_server;
 pub mod json_processor;
@@ -21,6 +23,8 @@ pub use concurrency_test::{
 };
 pub use config::{AppConfig, ConfigManager, create_default_config, create_test_config};
 pub use db::SqliteRecorder;
+pub use db_adapter::{DbRecorder, get_recorder}; // 新增适配器导出
+pub use db_batch::SqliteBatchRecorder; // 新增批量记录器导出
 pub use http_client::{HttpClientConfig, HttpClientService};
 pub use http_server::{HttpServerService, start_http_server};
 pub use json_processor::{JsonProcessor, JsonProcessorError, parse_and_modify_json};
