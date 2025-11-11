@@ -67,17 +67,35 @@ impl MessageProcessor {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| "unknown".to_string());
+        if !["hawkResult", "TextToRuleArmingEvent"].contains(&event_type.as_str()) {
+            return Ok(());
+        }
+        let is_hawk = event_type == "hawkResult";
+        let (request_id_path, task_uuid_path, alarm_time_path) = if is_hawk {
+            (
+                "/analysisResult/0/targetAttrs/request_id",
+                "/analysisResult/0/targetAttrs/task_uuid",
+                "/analysisResult/0/timeStamp",
+            )
+        } else {
+            (
+                "/targetAttr/request_id",
+                "/targetAttr/task_uuid",
+                "/TextToRuleArmingEvent/time",
+            )
+        };
+
         let request_id = payload
-            .pointer("/analysisResult/0/targetAttrs/request_id")
+            .pointer(request_id_path)
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
         let task_uuid = payload
-            .pointer("/analysisResult/0/targetAttrs/task_uuid")
+            .pointer(task_uuid_path)
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_default();
         let alarm_time = payload
-            .pointer("/analysisResult/0/timeStamp")
+            .pointer(alarm_time_path)
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
 
@@ -94,17 +112,6 @@ impl MessageProcessor {
                 request_id,
                 Some(task_uuid.clone()),
                 event_type,
-                msg_timestamp,
-                alarm_time,
-            )
-            .await;
-
-        // 同时保持原有的报警更新逻辑
-        let _ = recorder
-            .update_alarm(
-                Some(task_uuid),
-                Some(request_id as usize),
-                true,
                 msg_timestamp,
                 alarm_time,
             )
