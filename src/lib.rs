@@ -15,7 +15,8 @@ pub mod db_batch; // 新增批量写入模块
 pub mod http_client;
 pub mod http_server;
 pub mod json_processor;
-pub mod message; // <-- 新增 // <-- 新增
+pub mod message;
+pub mod performance_test;
 
 // 重新导出主要类型，方便使用
 pub use concurrency_test::{
@@ -28,7 +29,8 @@ pub use db_batch::SqliteBatchRecorder; // 新增批量记录器导出
 pub use http_client::{HttpClientConfig, HttpClientService};
 pub use http_server::{HttpServerService, start_http_server};
 pub use json_processor::{JsonProcessor, JsonProcessorError, parse_and_modify_json};
-pub use message::{Message, MessageFormat, MessageProcessor, MessageSource}; // <-- 新增导出 // <-- 导出记录器（可选）
+pub use message::{Message, MessageFormat, MessageProcessor, MessageSource};
+pub use performance_test::{main_performance_test, run_performance_test};
 
 /// 库版本信息
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
