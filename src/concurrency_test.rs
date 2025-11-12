@@ -13,6 +13,7 @@ pub struct ConcurrencyConfig {
     pub requests_per_second: usize,
     pub duration_seconds: u64,
     pub url: String,
+    pub enable_interval_balance: bool,
 }
 
 impl Default for ConcurrencyConfig {
@@ -21,6 +22,7 @@ impl Default for ConcurrencyConfig {
             requests_per_second: 120,
             duration_seconds: 30,
             url: "https://jsonplaceholder.typicode.com/posts".to_string(),
+            enable_interval_balance: false,
         }
     }
 }
@@ -146,6 +148,13 @@ impl ConcurrencyTestService {
         while start_time.elapsed().as_secs() < config.duration_seconds {
             let second_start = Instant::now();
 
+            // 计算每个请求之间的平均间隔（毫秒）
+            let interval_ms = if config.requests_per_second > 0 {
+                1000.0 / config.requests_per_second as f64
+            } else {
+                0.0
+            };
+
             // 创建当前秒的所有并发任务并加入 JoinSet
             for i in 0..config.requests_per_second {
                 let test_uuid_clone = test_uuid.clone();
@@ -157,7 +166,19 @@ impl ConcurrencyTestService {
                 // 为每个任务准备要移动的值，避免在 async move 中多次移动同一值或共享可变数据
                 let mut json_clone = base_json.clone();
 
+                // 计算当前请求的延迟时间（仅在启用间隔均衡时使用）
+                let delay_ms = if config.enable_interval_balance {
+                    (i as f64 * interval_ms).round() as u64
+                } else {
+                    0
+                };
+
                 join_set.spawn(async move {
+                    // 等待指定的延迟时间，仅在启用间隔均衡时实现均匀分布
+                    if delay_ms > 0 {
+                        sleep(Duration::from_millis(delay_ms)).await;
+                    }
+
                     let timestamp = chrono::Utc::now().to_rfc3339();
                     let ts_seconds = chrono::Utc::now().timestamp();
                     // 为每个并发任务生成唯一的 UUID
@@ -404,6 +425,7 @@ pub async fn run_simple_concurrency_test(
         url: url.to_string(),
         requests_per_second,
         duration_seconds,
+        enable_interval_balance: false,
     };
 
     let http_client = HttpClientService::new(Default::default())?;

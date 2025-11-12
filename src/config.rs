@@ -214,6 +214,7 @@ impl ConfigManager {
             requests_per_second: self.config.concurrency_test.default_requests_per_second,
             duration_seconds: self.config.concurrency_test.default_duration_seconds,
             url: self.config.concurrency_test.default_test_url.clone(),
+            enable_interval_balance: false,
         }
     }
 

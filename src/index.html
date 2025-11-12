@@ -98,6 +98,21 @@
                         placeholder="30">
                 </div>
 
+                <!-- 间隔均衡配置 -->
+                <div class="md:col-span-2">
+                    <div class="flex items-center">
+                        <input x-model="config.enable_interval_balance" type="checkbox" id="interval-balance"
+                            class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded">
+                        <label for="interval-balance" class="ml-2 block text-sm font-medium text-gray-700">
+                            <i class="fas fa-balance-scale text-teal-500 mr-2"></i>
+                            间隔均衡
+                        </label>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-1">
+                        勾选后，每秒的请求将均匀分布，避免突发发送模式
+                    </p>
+                </div>
+
                 <!-- JSON数据配置 -->
                 <div class="md:col-span-2">
                     <label class="block text-sm font-medium text-gray-700 mb-2">
@@ -178,6 +193,7 @@
                     password: '',
                     requests_per_second: 100,
                     duration_seconds: 30,
+                    enable_interval_balance: false,
                     json_data: `{
   "title": "Test Post",
   "body": "This is a test post for performance testing",
@@ -200,6 +216,7 @@
                             password: this.config.password || '',
                             requests_per_second: parseInt(this.config.requests_per_second) || 100,
                             duration_seconds: parseInt(this.config.duration_seconds) || 30,
+                            enable_interval_balance: this.config.enable_interval_balance || false,
                             json_data: this.config.json_data
                         };
 
@@ -229,6 +246,7 @@
                         password: '',
                         requests_per_second: 100,
                         duration_seconds: 30,
+                        enable_interval_balance: false,
                         json_data: `{
   "title": "Test Post",
   "body": "This is a test post for performance testing",

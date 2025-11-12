@@ -19,6 +19,7 @@ struct TestRequest {
     password: String,
     requests_per_second: u64,
     duration_seconds: u64,
+    enable_interval_balance: Option<bool>,
     json_data: String,
 }
 
@@ -138,6 +139,7 @@ async fn handle_test_request(
         requests_per_second: test_request.requests_per_second as usize,
         duration_seconds: test_request.duration_seconds,
         url: test_request.url,
+        enable_interval_balance: test_request.enable_interval_balance.unwrap_or(false),
     };
 
     // 执行测试
