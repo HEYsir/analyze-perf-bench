@@ -187,13 +187,6 @@ async fn handle_alert_request(body: Bytes) -> Result<Box<dyn warp::Reply>, warp:
     // 根据内容判断并解析格式
     match detect_and_parse_format(&content) {
         Ok((payload, format)) => {
-            // 记录报警信息
-            println!(
-                "收到报警 - 格式: {:?}, 内容长度: {} 字节",
-                format,
-                content.len()
-            );
-
             // 构造 Message 并异步投递到消息处理器（包含数据库记录）
             let msg_format = match format.as_str() {
                 "JSON" => MessageFormat::Json,

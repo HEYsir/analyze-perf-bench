@@ -71,20 +71,26 @@ impl MessageProcessor {
             return Ok(());
         }
         let is_hawk = event_type == "hawkResult";
-        let (request_id_path, task_uuid_path, alarm_time_path) = if is_hawk {
+        let (test_uuid_path, request_id_path, task_uuid_path, alarm_time_path) = if is_hawk {
             (
+                "/analysisResult/0/targetAttrs/test_uuid",
                 "/analysisResult/0/targetAttrs/request_id",
                 "/analysisResult/0/targetAttrs/task_uuid",
                 "/analysisResult/0/timeStamp",
             )
         } else {
             (
+                "/targetAttr/test_uuid",
                 "/targetAttr/request_id",
                 "/targetAttr/task_uuid",
                 "/TextToRuleArmingEvent/time",
             )
         };
-
+        let test_uuid = payload
+            .pointer(test_uuid_path)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
         let request_id = payload
             .pointer(request_id_path)
             .and_then(|v| v.as_u64())
@@ -109,6 +115,7 @@ impl MessageProcessor {
         // 将消息记录存储到新的数据表（使用批量写入）
         let _ = recorder
             .insert_message(
+                Some(test_uuid.clone()),
                 request_id,
                 Some(task_uuid.clone()),
                 event_type,

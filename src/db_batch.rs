@@ -18,24 +18,20 @@ pub struct SqliteBatchRecorder {
 /// 批量写入命令类型
 enum BatchDbCommandType {
     InsertRequest {
+        test_uuid: String,
         ts_seconds: i64,
         task_uuid: Option<String>,
         request_id: usize,
         seq_in_second: usize,
         success: bool,
         error_text: Option<String>,
+        response_time_ms: i64,
     },
     InsertMessage {
+        test_uuid: Option<String>,
         request_id: u64,
         task_uuid: Option<String>,
         event_type: String,
-        receive_time: i64,
-        alarm_time: i64,
-    },
-    UpdateAlarm {
-        task_uuid: Option<String>,
-        request_id: Option<usize>,
-        alarm_triggered: bool,
         receive_time: i64,
         alarm_time: i64,
     },
@@ -52,7 +48,6 @@ struct BatchDbCommand {
 struct BatchBuffer {
     requests: VecDeque<BatchDbCommandType>,
     messages: VecDeque<BatchDbCommandType>,
-    updates: VecDeque<BatchDbCommandType>,
     last_flush: Instant,
     buffer_size: usize,
     flush_interval: Duration,
@@ -63,7 +58,6 @@ impl BatchBuffer {
         Self {
             requests: VecDeque::new(),
             messages: VecDeque::new(),
-            updates: VecDeque::new(),
             last_flush: Instant::now(),
             buffer_size,
             flush_interval,
@@ -78,9 +72,6 @@ impl BatchBuffer {
             BatchDbCommandType::InsertMessage { .. } => {
                 self.messages.push_back(cmd_type);
             }
-            BatchDbCommandType::UpdateAlarm { .. } => {
-                self.updates.push_back(cmd_type);
-            }
             BatchDbCommandType::Flush => {} // Flush 命令不加入缓冲区
         }
     }
@@ -88,27 +79,19 @@ impl BatchBuffer {
     fn should_flush(&self) -> bool {
         self.requests.len() >= self.buffer_size
             || self.messages.len() >= self.buffer_size
-            || self.updates.len() >= self.buffer_size
             || self.last_flush.elapsed() >= self.flush_interval
     }
 
-    fn take_all(
-        &mut self,
-    ) -> (
-        VecDeque<BatchDbCommandType>,
-        VecDeque<BatchDbCommandType>,
-        VecDeque<BatchDbCommandType>,
-    ) {
+    fn take_all(&mut self) -> (VecDeque<BatchDbCommandType>, VecDeque<BatchDbCommandType>) {
         self.last_flush = Instant::now();
         (
             std::mem::take(&mut self.requests),
             std::mem::take(&mut self.messages),
-            std::mem::take(&mut self.updates),
         )
     }
 
     fn is_empty(&self) -> bool {
-        self.requests.is_empty() && self.messages.is_empty() && self.updates.is_empty()
+        self.requests.is_empty() && self.messages.is_empty()
     }
 }
 
@@ -167,19 +150,19 @@ impl SqliteBatchRecorder {
                         
                         CREATE TABLE IF NOT EXISTS request_records (
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            test_uuid TEST,
                             ts_seconds INTEGER NOT NULL,
                             task_uuid TEXT,
                             request_id INTEGER NOT NULL,
                             seq_in_second INTEGER NOT NULL,
                             success INTEGER NOT NULL,
                             error_text TEXT,
-                            alarm_triggered INTEGER NOT NULL DEFAULT 0,
-                            receive_time INTEGER,
-                            alarm_time INTEGER
+                            response_time_ms INTEGER NOT NULL DEFAULT 0
                         );
                         
                         CREATE TABLE IF NOT EXISTS message_records (
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            test_uuid TEXT,
                             request_id INTEGER NOT NULL,
                             task_uuid TEXT,
                             event_type TEXT NOT NULL,
@@ -274,9 +257,9 @@ impl SqliteBatchRecorder {
         conn: &mut Connection,
         buffer: &mut BatchBuffer,
     ) -> Result<(), rusqlite::Error> {
-        let (requests, messages, updates) = buffer.take_all();
+        let (requests, messages) = buffer.take_all();
 
-        if requests.is_empty() && messages.is_empty() && updates.is_empty() {
+        if requests.is_empty() && messages.is_empty() {
             return Ok(());
         }
 
@@ -286,27 +269,31 @@ impl SqliteBatchRecorder {
         // 批量插入请求记录
         if !requests.is_empty() {
             let mut stmt = tx.prepare(
-                "INSERT INTO request_records (ts_seconds, task_uuid, request_id, seq_in_second, success, error_text) 
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+                "INSERT INTO request_records (test_uuid, ts_seconds, task_uuid, request_id, seq_in_second, success, error_text, response_time_ms) 
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
             )?;
 
             for cmd in requests {
                 if let BatchDbCommandType::InsertRequest {
+                    test_uuid,
                     ts_seconds,
                     task_uuid,
                     request_id,
                     seq_in_second,
                     success,
                     error_text,
+                    response_time_ms,
                 } = cmd
                 {
                     stmt.execute(params![
+                        test_uuid,
                         ts_seconds,
                         task_uuid,
                         request_id as i64,
                         seq_in_second as i64,
                         if success { 1 } else { 0 },
-                        error_text
+                        error_text,
+                        response_time_ms,
                     ])?;
                 }
             }
@@ -315,12 +302,13 @@ impl SqliteBatchRecorder {
         // 批量插入消息记录
         if !messages.is_empty() {
             let mut stmt = tx.prepare(
-                "INSERT INTO message_records (request_id, task_uuid, event_type, receive_time, alarm_time) 
-                 VALUES (?1, ?2, ?3, ?4, ?5)"
+                "INSERT INTO message_records (test_uuid, request_id, task_uuid, event_type, receive_time, alarm_time) 
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
             )?;
 
             for cmd in messages {
                 if let BatchDbCommandType::InsertMessage {
+                    test_uuid,
                     request_id,
                     task_uuid,
                     event_type,
@@ -329,49 +317,13 @@ impl SqliteBatchRecorder {
                 } = cmd
                 {
                     stmt.execute(params![
+                        test_uuid,
                         request_id as i64,
                         task_uuid,
                         event_type,
                         receive_time,
                         alarm_time
                     ])?;
-                }
-            }
-        }
-
-        // 批量更新记录
-        if !updates.is_empty() {
-            for cmd in updates {
-                if let BatchDbCommandType::UpdateAlarm {
-                    task_uuid,
-                    request_id,
-                    alarm_triggered,
-                    receive_time,
-                    alarm_time,
-                } = cmd
-                {
-                    let mut sql = String::from("UPDATE request_records SET alarm_triggered = ?");
-                    let alarm_flag = if alarm_triggered { 1i32 } else { 0i32 };
-                    let mut params: Vec<&dyn rusqlite::ToSql> = vec![&alarm_flag];
-
-                    sql.push_str(", receive_time = ?");
-                    params.push(&receive_time);
-                    sql.push_str(", alarm_time = ?");
-                    params.push(&alarm_time);
-
-                    sql.push_str(" WHERE ");
-                    let mut conditions = Vec::new();
-                    if let Some(uuid) = &task_uuid {
-                        conditions.push("task_uuid = ?");
-                        params.push(uuid);
-                    }
-                    if let Some(rid) = &request_id {
-                        conditions.push("request_id = ?");
-                        params.push(rid);
-                    }
-                    sql.push_str(&conditions.join(" AND "));
-
-                    tx.execute(&sql, rusqlite::params_from_iter(params))?;
                 }
             }
         }
@@ -384,21 +336,25 @@ impl SqliteBatchRecorder {
     /// 异步插入请求记录（批量版本）
     pub async fn insert_request(
         &self,
+        test_uuid: String,
         ts_seconds: i64,
         task_uuid: Option<String>,
         request_id: usize,
         seq_in_second: usize,
         success: bool,
         error_text: Option<String>,
+        response_time_ms: i64,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.send_command(
             BatchDbCommandType::InsertRequest {
+                test_uuid,
                 ts_seconds,
                 task_uuid,
                 request_id,
                 seq_in_second,
                 success,
                 error_text,
+                response_time_ms,
             },
             false,
         )
@@ -408,6 +364,7 @@ impl SqliteBatchRecorder {
     /// 异步插入消息记录（批量版本）
     pub async fn insert_message(
         &self,
+        test_uuid: Option<String>,
         request_id: u64,
         task_uuid: Option<String>,
         event_type: String,
@@ -416,35 +373,10 @@ impl SqliteBatchRecorder {
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.send_command(
             BatchDbCommandType::InsertMessage {
+                test_uuid,
                 request_id,
                 task_uuid,
                 event_type,
-                receive_time,
-                alarm_time,
-            },
-            false,
-        )
-        .await
-    }
-
-    /// 异步更新报警记录（批量版本）
-    pub async fn update_alarm(
-        &self,
-        task_uuid: Option<String>,
-        request_id: Option<usize>,
-        alarm_triggered: bool,
-        receive_time: i64,
-        alarm_time: i64,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        if task_uuid.is_none() && request_id.is_none() {
-            return Err("必须提供 task_uuid 或 request_id 其中之一".into());
-        }
-
-        self.send_command(
-            BatchDbCommandType::UpdateAlarm {
-                task_uuid,
-                request_id,
-                alarm_triggered,
                 receive_time,
                 alarm_time,
             },

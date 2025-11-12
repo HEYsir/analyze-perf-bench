@@ -149,7 +149,7 @@ impl HttpClientService {
             None => return Err(anyhow!("Missing WWW-Authenticate header")),
         };
         let header_str = auth_header.to_str().unwrap_or("");
-        println!("收到认证挑战: {}", header_str);
+        // println!("收到认证挑战: {}", header_str);
 
         // 使用 digest_auth 库解析挑战头
         let mut auth_header = WwwAuthenticateHeader::parse(header_str).map_err(|e| {

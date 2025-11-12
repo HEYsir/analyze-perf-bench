@@ -17,21 +17,17 @@ pub struct SqliteRecorder {
 
 enum DbCommandType {
     Insert {
+        test_uuid: String,
         ts_seconds: i64,
         task_uuid: Option<String>,
         request_id: usize,
         seq_in_second: usize,
         success: bool,
         error_text: Option<String>,
-    },
-    UpdateAlarm {
-        task_uuid: Option<String>,
-        request_id: Option<usize>,
-        alarm_triggered: bool,
-        receive_time: i64,
-        alarm_time: i64,
+        response_time_ms: i64,
     },
     InsertMessage {
+        test_uuid: Option<String>,
         request_id: u64,
         task_uuid: Option<String>,
         event_type: String,
@@ -96,18 +92,18 @@ impl SqliteRecorder {
                         PRAGMA journal_mode = WAL;
                         CREATE TABLE IF NOT EXISTS request_records (
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            test_uuid TEXT,
                             ts_seconds INTEGER NOT NULL,
                             task_uuid TEXT,
                             request_id INTEGER NOT NULL,
                             seq_in_second INTEGER NOT NULL,
                             success INTEGER NOT NULL,
                             error_text TEXT,
-                            alarm_triggered INTEGER NOT NULL DEFAULT 0,
-                            receive_time INTEGER,
-                            alarm_time INTEGER
+                            response_time_ms INTEGER NOT NULL，
                         );
                         CREATE TABLE IF NOT EXISTS message_records (
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            test_uuid TEXT,
                             request_id INTEGER NOT NULL,
                             task_uuid TEXT,
                             event_type TEXT NOT NULL,
@@ -125,65 +121,40 @@ impl SqliteRecorder {
                     for cmd in rx {
                         let res = match cmd.cmd_type {
                             DbCommandType::Insert {
+                                test_uuid,
                                 ts_seconds,
                                 task_uuid,
                                 request_id,
                                 seq_in_second,
                                 success,
                                 error_text,
+                                response_time_ms,
                             } => conn.execute(
-                                "INSERT INTO request_records (ts_seconds, task_uuid, request_id, seq_in_second, success, error_text)
-                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                                "INSERT INTO request_records (test_uuid, ts_seconds, task_uuid, request_id, seq_in_second, success, error_text, response_time_ms，)
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                                 params![
+                                    test_uuid,
                                     ts_seconds,
                                     task_uuid,
                                     request_id as i64,
                                     seq_in_second as i64,
                                     if success { 1 } else { 0 },
-                                    error_text
+                                    error_text,
+                                    response_time_ms,
                                 ],
                             ),
-                            DbCommandType::UpdateAlarm {
-                                task_uuid,
-                                request_id,
-                                alarm_triggered,
-                                receive_time,
-                                alarm_time,
-                            } => {
-                                let mut sql = String::from("UPDATE request_records SET alarm_triggered = ?");
-                                // Create owned values that live long enough
-                                let alarm_flag = if alarm_triggered { 1i32 } else { 0i32 };
-                                let mut params: Vec<&dyn rusqlite::ToSql> = vec![&alarm_flag];
-
-                                sql.push_str(", receive_time = ?");
-                                params.push(&receive_time);
-                                sql.push_str(", alarm_time = ?");
-                                params.push(&alarm_time);
-
-                                sql.push_str(" WHERE ");
-                                let mut conditions = Vec::new();
-                                if let Some(uuid) = &task_uuid {
-                                    conditions.push("task_uuid = ?");
-                                    params.push(uuid);
-                                }
-                                if let Some(rid) = &request_id {
-                                    conditions.push("request_id = ?");
-                                    params.push(rid);
-                                }
-                                sql.push_str(&conditions.join(" AND "));
-
-                                conn.execute(&sql, rusqlite::params_from_iter(params))
-                            }
                             DbCommandType::InsertMessage {
+                                test_uuid,
                                 request_id,
                                 task_uuid,
                                 event_type,
                                 receive_time,
                                 alarm_time,
                             } => conn.execute(
-                                "INSERT INTO message_records (request_id, task_uuid, event_type, receive_time, alarm_time)
-                                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                                "INSERT INTO message_records (test_uuid, request_id, task_uuid, event_type, receive_time, alarm_time)
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                                 params![
+                                    test_uuid,
                                     request_id as i64,
                                     task_uuid,
                                     event_type,
@@ -249,12 +220,14 @@ impl SqliteRecorder {
     /// 异步插入一条请求记录，使用后台线程的单一连接执行
     pub async fn insert_request(
         &self,
+        test_uuid: String,
         ts_seconds: i64,
         task_uuid: Option<String>,
         request_id: usize,
         seq_in_second: usize,
         success: bool,
         error_text: Option<String>,
+        response_time_ms: i64,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // 获取 sender（使用异步锁）
         let sender_opt = { self.cmd_sender.lock().await.clone() };
@@ -271,12 +244,14 @@ impl SqliteRecorder {
         // 构造命令
         let cmd = DbCommand {
             cmd_type: DbCommandType::Insert {
+                test_uuid,
                 ts_seconds,
                 task_uuid,
                 request_id,
                 seq_in_second,
                 success,
                 error_text,
+                response_time_ms,
             },
             resp: resp_tx,
         };
@@ -296,60 +271,10 @@ impl SqliteRecorder {
             Err(e) => Err(format!("发送命令时 spawn_blocking 出错: {}", e).into()),
         }
     }
-
-    /// 更新记录的报警相关字段
-    /// 可以通过 task_uuid 或 request_id 查找记录(至少需要提供一个)
-    /// 所有更新字段都是可选的，只更新提供的字段
-    pub async fn update_alarm(
-        &self,
-        task_uuid: Option<String>,
-        request_id: Option<usize>,
-        alarm_triggered: bool,
-        receive_time: i64,
-        alarm_time: i64,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        if task_uuid.is_none() && request_id.is_none() {
-            return Err("必须提供 task_uuid 或 request_id 其中之一".into());
-        }
-
-        // 获取 sender（使用异步锁）
-        let sender_opt = { self.cmd_sender.lock().await.clone() };
-        let sender = match sender_opt {
-            Some(s) => s,
-            None => return Err("SqliteRecorder 未初始化，请先调用 init(path)".into()),
-        };
-
-        // 准备 oneshot 用于等待结果
-        let (resp_tx, resp_rx) = oneshot::channel();
-
-        // 构造更新命令
-        let cmd = DbCommand {
-            cmd_type: DbCommandType::UpdateAlarm {
-                task_uuid,
-                request_id,
-                alarm_triggered,
-                receive_time,
-                alarm_time,
-            },
-            resp: resp_tx,
-        };
-
-        // 发送命令并等待结果
-        let send_result = tokio::task::spawn_blocking(move || sender.send(cmd)).await;
-        match send_result {
-            Ok(Ok(_)) => match tokio::time::timeout(Duration::from_secs(5), resp_rx).await {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => Err(format!("后台线程响应失败: {}", e).into()),
-                Err(_) => Err("等待后台 DB 响应超时".into()),
-            },
-            Ok(Err(e)) => Err(format!("向后台线程发送命令失败: {}", e).into()),
-            Err(e) => Err(format!("发送命令时 spawn_blocking 出错: {}", e).into()),
-        }
-    }
-
     /// 插入消息记录到新的数据表
     pub async fn insert_message(
         &self,
+        test_uuid: Option<String>,
         request_id: u64,
         task_uuid: Option<String>,
         event_type: String,
@@ -371,6 +296,7 @@ impl SqliteRecorder {
         // 构造命令
         let cmd = DbCommand {
             cmd_type: DbCommandType::InsertMessage {
+                test_uuid,
                 request_id,
                 task_uuid,
                 event_type,

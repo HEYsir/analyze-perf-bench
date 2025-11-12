@@ -74,6 +74,7 @@ impl ConcurrencyTestService {
     }
 
     pub fn modify_json(
+        test_uuid: String,
         request_id: i64,
         timestamp: String,
         task_uuid: String,
@@ -81,6 +82,10 @@ impl ConcurrencyTestService {
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         // 替换字段值，添加 UUID（operate on the per-task clone）
         let modifications = vec![
+            (
+                "TaskInfo.picture.0.targetAttrs.test_uuid".to_string(),
+                Value::String(test_uuid.clone()),
+            ),
             (
                 "TaskInfo.picture.0.targetAttrs.request_timestamp".to_string(),
                 Value::String(timestamp.clone()),
@@ -121,14 +126,14 @@ impl ConcurrencyTestService {
         let mut failed_requests = 0;
         let mut all_request_results = Vec::new();
 
+        let test_uuid = Uuid::new_v4().to_string();
         println!(
-            "开始 {} 秒的并发测试，每秒 {} 个请求...",
-            config.duration_seconds, config.requests_per_second
+            "开始 {} 秒的并发测试，每秒 {} 个请求...测试uuid: {}",
+            config.duration_seconds, config.requests_per_second, test_uuid
         );
 
         // 计算总共需要执行的请求数
         let total_expected_requests = config.requests_per_second * config.duration_seconds as usize;
-
         // 使用 JoinSet 来管理并发任务
         let mut join_set = JoinSet::new();
 
@@ -143,6 +148,7 @@ impl ConcurrencyTestService {
 
             // 创建当前秒的所有并发任务并加入 JoinSet
             for i in 0..config.requests_per_second {
+                let test_uuid_clone = test_uuid.clone();
                 let client = self.http_client.clone();
                 let url = config.url.clone();
                 let request_id = total_requests + i + 1;
@@ -158,6 +164,7 @@ impl ConcurrencyTestService {
                     let task_uuid = Uuid::new_v4().to_string();
 
                     let body_out = match ConcurrencyTestService::modify_json(
+                        test_uuid_clone.clone(),
                         request_id as i64,
                         timestamp.clone(),
                         task_uuid.clone(),
@@ -209,12 +216,14 @@ impl ConcurrencyTestService {
                     let recorder = get_recorder().await;
                     if let Err(e) = recorder
                         .insert_request(
+                            test_uuid_clone.clone(),
                             ts_seconds,
                             request_result.task_uuid.clone(),
                             request_result.request_id,
                             request_result.seq_in_second,
                             request_result.success,
                             request_result.error_message.clone(),
+                            request_result.response_time_ms as i64,
                         )
                         .await
                     {

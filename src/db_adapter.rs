@@ -53,35 +53,41 @@ impl DbRecorder {
     /// 插入请求记录
     pub async fn insert_request(
         &self,
+        test_uuid: String,
         ts_seconds: i64,
         task_uuid: Option<String>,
         request_id: usize,
         seq_in_second: usize,
         success: bool,
         error_text: Option<String>,
+        response_time_ms: i64,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         match self {
             DbRecorder::Original(recorder) => {
                 recorder
                     .insert_request(
+                        test_uuid,
                         ts_seconds,
                         task_uuid,
                         request_id,
                         seq_in_second,
                         success,
                         error_text,
+                        response_time_ms,
                     )
                     .await
             }
             DbRecorder::Batch(recorder) => {
                 recorder
                     .insert_request(
+                        test_uuid,
                         ts_seconds,
                         task_uuid,
                         request_id,
                         seq_in_second,
                         success,
                         error_text,
+                        response_time_ms,
                     )
                     .await
             }
@@ -91,6 +97,7 @@ impl DbRecorder {
     /// 插入消息记录
     pub async fn insert_message(
         &self,
+        test_uuid: Option<String>,
         request_id: u64,
         task_uuid: Option<String>,
         event_type: String,
@@ -100,33 +107,11 @@ impl DbRecorder {
         match self {
             DbRecorder::Original(recorder) => {
                 recorder
-                    .insert_message(request_id, task_uuid, event_type, receive_time, alarm_time)
-                    .await
-            }
-            DbRecorder::Batch(recorder) => {
-                recorder
-                    .insert_message(request_id, task_uuid, event_type, receive_time, alarm_time)
-                    .await
-            }
-        }
-    }
-
-    /// 更新报警记录
-    pub async fn update_alarm(
-        &self,
-        task_uuid: Option<String>,
-        request_id: Option<usize>,
-        alarm_triggered: bool,
-        receive_time: i64,
-        alarm_time: i64,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        match self {
-            DbRecorder::Original(recorder) => {
-                recorder
-                    .update_alarm(
-                        task_uuid,
+                    .insert_message(
+                        test_uuid,
                         request_id,
-                        alarm_triggered,
+                        task_uuid,
+                        event_type,
                         receive_time,
                         alarm_time,
                     )
@@ -134,10 +119,11 @@ impl DbRecorder {
             }
             DbRecorder::Batch(recorder) => {
                 recorder
-                    .update_alarm(
-                        task_uuid,
+                    .insert_message(
+                        test_uuid,
                         request_id,
-                        alarm_triggered,
+                        task_uuid,
+                        event_type,
                         receive_time,
                         alarm_time,
                     )
