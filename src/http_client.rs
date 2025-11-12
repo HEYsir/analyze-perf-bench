@@ -66,6 +66,11 @@ impl HttpClientService {
         })
     }
 
+    /// 使用默认配置创建 HTTP 客户端服务
+    pub fn new_default() -> Result<Self> {
+        Self::new(Default::default())
+    }
+
     /// 发送 POST 请求（支持智能认证）
     pub async fn post_json(
         &self,

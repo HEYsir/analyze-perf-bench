@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HTTP性能测试工具</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+
+<body class="bg-gray-50 min-h-screen">
+    <div x-data="app()" class="container mx-auto px-4 py-8">
+        <!-- 头部 -->
+        <div class="text-center mb-8">
+            <h1 class="text-4xl font-bold text-gray-800 mb-2">
+                <i class="fas fa-bolt text-yellow-500 mr-3"></i>
+                HTTP性能测试工具
+            </h1>
+            <p class="text-gray-600">高性能并发HTTP请求测试平台</p>
+        </div>
+
+        <!-- 配置面板 -->
+        <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+            <h2 class="text-2xl font-semibold text-gray-800 mb-4">
+                <i class="fas fa-cog text-blue-500 mr-2"></i>
+                测试配置
+            </h2>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <!-- URL配置 -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">
+                        <i class="fas fa-link text-green-500 mr-2"></i>
+                        目标URL
+                    </label>
+                    <input x-model="config.url" type="url"
+                        class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="https://example.com/api">
+                </div>
+
+                <!-- 认证配置 -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">
+                        <i class="fas fa-key text-red-500 mr-2"></i>
+                        认证类型
+                    </label>
+                    <select x-model="config.auth_type"
+                        class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="none">无认证</option>
+                        <option value="basic">Basic认证</option>
+                        <option value="digest">Digest认证</option>
+                    </select>
+                </div>
+
+                <!-- 用户名配置 -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">
+                        <i class="fas fa-user text-blue-500 mr-2"></i>
+                        用户名
+                    </label>
+                    <input x-model="config.username" type="text"
+                        class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="admin">
+                </div>
+
+                <!-- 密码配置 -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">
+                        <i class="fas fa-lock text-gray-500 mr-2"></i>
+                        密码
+                    </label>
+                    <input x-model="config.password" type="password"
+                        class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="password">
+                </div>
+
+                <!-- 并发数配置 -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">
+                        <i class="fas fa-users text-purple-500 mr-2"></i>
+                        每秒请求数
+                    </label>
+                    <input x-model="config.requests_per_second" type="number" min="1" max="1000"
+                        class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="100">
+                </div>
+
+                <!-- 持续时间配置 -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">
+                        <i class="fas fa-clock text-orange-500 mr-2"></i>
+                        测试时长（秒）
+                    </label>
+                    <input x-model="config.duration_seconds" type="number" min="1" max="3600"
+                        class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="30">
+                </div>
+
+                <!-- JSON数据配置 -->
+                <div class="md:col-span-2">
+                    <label class="block text-sm font-medium text-gray-700 mb-2">
+                        <i class="fas fa-code text-indigo-500 mr-2"></i>
+                        JSON请求数据
+                    </label>
+                    <textarea x-model="config.json_data" rows="6"
+                        class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+                        placeholder='{"example": "data"}'></textarea>
+                </div>
+            </div>
+
+            <!-- 操作按钮 -->
+            <div class="flex gap-3 mt-6">
+                <button @click="startTest()" :disabled="isTesting"
+                    class="flex-1 bg-blue-600 text-white px-6 py-3 rounded-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors">
+                    <i class="fas fa-play mr-2"></i>
+                    <span x-text="isTesting ? '测试中...' : '开始测试'"></span>
+                </button>
+
+                <button @click="resetConfig()"
+                    class="px-6 py-3 border border-gray-300 text-gray-700 rounded-md hover:bg-gray-50 transition-colors">
+                    <i class="fas fa-redo mr-2"></i>
+                    重置配置
+                </button>
+            </div>
+        </div>
+
+        <!-- 测试结果 -->
+        <div x-show="results" class="bg-white rounded-lg shadow-lg p-6">
+            <h2 class="text-2xl font-semibold text-gray-800 mb-4">
+                <i class="fas fa-chart-bar text-green-500 mr-2"></i>
+                测试结果
+            </h2>
+
+            <div x-show="results" class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                <div class="text-center p-4 bg-green-50 rounded-lg">
+                    <div class="text-2xl font-bold text-green-600" x-text="results.successful_requests || 0"></div>
+                    <div class="text-sm text-green-800">成功请求</div>
+                </div>
+                <div class="text-center p-4 bg-red-50 rounded-lg">
+                    <div class="text-2xl font-bold text-red-600" x-text="results.failed_requests || 0"></div>
+                    <div class="text-sm text-red-800">失败请求</div>
+                </div>
+                <div class="text-center p-4 bg-blue-50 rounded-lg">
+                    <div class="text-2xl font-bold text-blue-600"
+                        x-text="(results.average_response_time || 0).toFixed(2) + 'ms'"></div>
+                    <div class="text-sm text-blue-800">平均响应时间</div>
+                </div>
+                <div class="text-center p-4 bg-purple-50 rounded-lg">
+                    <div class="text-2xl font-bold text-purple-600" x-text="(results.throughput || 0).toFixed(2)"></div>
+                    <div class="text-sm text-purple-800">吞吐量(请求/秒)</div>
+                </div>
+            </div>
+
+            <!-- 详细结果 -->
+            <div x-show="results.detailed_results" class="mt-4">
+                <h3 class="text-lg font-semibold text-gray-700 mb-2">详细结果</h3>
+                <pre class="bg-gray-100 p-4 rounded-md text-sm overflow-auto max-h-64"
+                    x-text="results.detailed_results"></pre>
+            </div>
+        </div>
+
+        <!-- 状态指示器 -->
+        <div x-show="isTesting" class="fixed bottom-4 right-4 bg-blue-600 text-white px-4 py-2 rounded-full shadow-lg">
+            <i class="fas fa-spinner fa-spin mr-2"></i>
+            测试进行中...
+        </div>
+    </div>
+
+    <script>
+        function app() {
+            return {
+                config: {
+                    url: 'https://10.41.131.103/ISAPI/SDT/Management/Task/Picture?format=json',
+                    auth_type: 'none',
+                    username: '',
+                    password: '',
+                    requests_per_second: 100,
+                    duration_seconds: 30,
+                    json_data: `{
+  "title": "Test Post",
+  "body": "This is a test post for performance testing",
+  "userId": 1
+}`
+                },
+                isTesting: false,
+                results: null,
+
+                async startTest() {
+                    this.isTesting = true;
+                    this.results = null;
+
+                    try {
+                        // 确保数值字段被正确转换为数字，并包含认证信息
+                        const requestData = {
+                            url: this.config.url,
+                            auth_type: this.config.auth_type || 'none',
+                            username: this.config.username || '',
+                            password: this.config.password || '',
+                            requests_per_second: parseInt(this.config.requests_per_second) || 100,
+                            duration_seconds: parseInt(this.config.duration_seconds) || 30,
+                            json_data: this.config.json_data
+                        };
+
+                        const response = await fetch('/api/start-test', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(requestData)
+                        });
+
+                        if (response.ok) {
+                            this.results = await response.json();
+                        } else {
+                            alert('测试启动失败: ' + await response.text());
+                        }
+                    } catch (error) {
+                        alert('网络错误: ' + error.message);
+                    } finally {
+                        this.isTesting = false;
+                    }
+                },
+
+                resetConfig() {
+                    this.config = {
+                        url: 'https://10.41.131.103/ISAPI/SDT/Management/Task/Picture?format=json',
+                        auth_type: 'none',
+                        username: '',
+                        password: '',
+                        requests_per_second: 100,
+                        duration_seconds: 30,
+                        json_data: `{
+  "title": "Test Post",
+  "body": "This is a test post for performance testing",
+  "userId": 1
+}`
+                    };
+                    this.results = null;
+                }
+            }
+        }
+    </script>
+</body>
+
+</html>

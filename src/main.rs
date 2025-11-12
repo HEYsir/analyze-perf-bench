@@ -1,140 +1,287 @@
-use std::fs;
+use HMSClipTest_rs::concurrency_test::{ConcurrencyConfig, ConcurrencyTestService};
+use HMSClipTest_rs::db_adapter::get_recorder;
+use HMSClipTest_rs::http_client::{AuthConfig, AuthType, HttpClientConfig, HttpClientService};
+use HMSClipTest_rs::init_logging;
+use HMSClipTest_rs::message::{Message, MessageFormat, MessageProcessor, MessageSource};
+use bytes::Bytes;
+use quick_xml::de::from_str as xml_from_str;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use uuid::Uuid;
+use warp::Filter;
+use warp::http::StatusCode;
 
-use HMSClipTest_rs::{
-    concurrency_test::ConcurrencyTestService,
-    config::ConfigManager,
-    http_client::HttpClientService,
-    http_server::{check_server_health, start_http_server_background},
-    init_logging,
-    json_processor::JsonProcessor,
-};
-use serde_json;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TestRequest {
+    url: String,
+    auth_type: String,
+    username: String,
+    password: String,
+    requests_per_second: u64,
+    duration_seconds: u64,
+    json_data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TestResult {
+    success: bool,
+    total_requests: usize,
+    successful_requests: usize,
+    failed_requests: usize,
+    average_response_time: f64,
+    throughput: f64,
+    error_rate: f64,
+    duration: u64,
+    detailed_results: Option<String>,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 初始化日志系统
     init_logging();
 
-    // 创建配置管理器
-    let config_manager = ConfigManager::new();
+    println!("启动简化的 HTTP 性能测试 Web UI...");
+    println!("服务器将运行在 http://localhost:8081");
+    println!("可用端点:");
+    println!("  GET / - Web 界面");
+    println!("  POST /api/start-test - 启动性能测试");
+    println!("  POST /alert - 接收报警（JSON/XML格式）");
+    println!("  GET /health - 健康检查");
 
-    // 验证配置
-    if let Err(errors) = config_manager.validate() {
-        eprintln!("配置验证失败:");
-        for error in errors {
-            eprintln!("  - {}", error);
-        }
-        return Ok(());
-    }
-    // 在后台启动 HTTP 服务器（不阻塞主线程）
-    let port = 8081;
-    match start_http_server_background(port).await {
-        Ok(server_handle) => {
-            println!("HTTP 服务器已在后台启动，端口: {}", port);
+    // 主页路由
+    let index_route = warp::path::end().map(|| warp::reply::html(include_str!("index.html")));
 
-            // 等待服务器启动并检查状态
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    // API 路由 - 性能测试
+    let api_routes = warp::path("api")
+        .and(warp::path("start-test"))
+        .and(warp::post())
+        .and(warp::body::json())
+        .and_then(handle_test_request);
 
-            match check_server_health(port).await {
-                Ok(true) => println!("HTTP 服务器健康检查通过"),
-                Ok(false) => eprintln!("HTTP 服务器健康检查失败"),
-                Err(e) => eprintln!("HTTP 服务器健康检查错误: {}", e),
+    // 报警接收路由
+    let alert_route = warp::path("alert")
+        .and(warp::post())
+        .and(warp::body::bytes())
+        .and_then(handle_alert_request);
+
+    // 健康检查路由
+    let health_route = warp::path("health").and(warp::get()).map(|| {
+        warp::reply::json(&serde_json::json!({
+            "status": "healthy",
+            "service": "simple_web_ui",
+            "timestamp": chrono::Utc::now().to_rfc3339()
+        }))
+    });
+
+    // 组合所有路由
+    let routes = index_route
+        .or(api_routes)
+        .or(alert_route)
+        .or(health_route)
+        .with(warp::cors().allow_any_origin());
+
+    warp::serve(routes).run(([0, 0, 0, 0], 8081)).await;
+
+    Ok(())
+}
+
+async fn handle_test_request(
+    test_request: TestRequest,
+) -> Result<Box<dyn warp::Reply>, warp::Rejection> {
+    // 根据认证配置创建HTTP客户端
+    let http_client = if test_request.auth_type != "none" && !test_request.username.is_empty() {
+        // 创建认证配置
+        let auth_config = AuthConfig {
+            username: test_request.username.clone(),
+            password: test_request.password.clone(),
+            auth_type: match test_request.auth_type.as_str() {
+                "basic" => AuthType::Basic,
+                "digest" => AuthType::Digest,
+                _ => AuthType::Basic,
+            },
+        };
+
+        let config = HttpClientConfig {
+            timeout: std::time::Duration::from_secs(30),
+            user_agent: "Rust-HTTP-Client/1.0".to_string(),
+            auth: Some(auth_config),
+        };
+
+        match HttpClientService::new(config) {
+            Ok(client) => client,
+            Err(e) => {
+                let reply = warp::reply::with_status(
+                    format!("创建认证HTTP客户端失败: {}", e),
+                    warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                );
+                return Ok(Box::new(reply));
             }
+        }
+    } else {
+        // 创建无认证的HTTP客户端
+        match HttpClientService::new_default() {
+            Ok(client) => client,
+            Err(e) => {
+                let reply = warp::reply::with_status(
+                    format!("创建HTTP客户端失败: {}", e),
+                    warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                );
+                return Ok(Box::new(reply));
+            }
+        }
+    };
 
-            // 保存服务器句柄（如果需要后续控制）
-            let _server_handle = server_handle;
+    // 创建测试服务
+    let test_service: ConcurrencyTestService = ConcurrencyTestService::new(http_client);
+
+    // 配置测试参数
+    let config = ConcurrencyConfig {
+        requests_per_second: test_request.requests_per_second as usize,
+        duration_seconds: test_request.duration_seconds,
+        url: test_request.url,
+    };
+
+    // 执行测试
+    match test_service
+        .run_test(&config, &test_request.json_data)
+        .await
+    {
+        Ok(result) => {
+            let test_result = TestResult {
+                success: true,
+                total_requests: result.summary.total_requests,
+                successful_requests: result.summary.successful_requests,
+                failed_requests: result.summary.failed_requests,
+                average_response_time: result.summary.average_response_time_ms,
+                throughput: result.summary.actual_rps,
+                error_rate: 100.0 - result.summary.success_rate,
+                duration: result.summary.total_duration_seconds,
+                detailed_results: Some(serde_json::to_string_pretty(&result).unwrap_or_default()),
+            };
+            let reply = warp::reply::json(&test_result);
+            Ok(Box::new(reply))
         }
         Err(e) => {
-            eprintln!("HTTP 服务器启动失败: {}", e);
-            return Ok(());
+            let reply = warp::reply::with_status(
+                format!("测试执行失败: {}", e),
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+            );
+            Ok(Box::new(reply))
         }
     }
+}
 
-    // 创建 HTTP 客户端
-    let http_config = config_manager
-        .create_http_client_config_with_digest_auth("admin".to_string(), "backend15".to_string());
-    let http_client = HttpClientService::new(http_config)?;
-
-    // 读取或创建示例 JSON 文件
-    let json_content = match JsonProcessor::read_json_file("post_data.json") {
-        Ok(content) => content,
-        Err(_) => {
-            println!("未找到 post_data.json 文件，创建示例文件...");
-            return Ok(());
+async fn handle_alert_request(body: Bytes) -> Result<Box<dyn warp::Reply>, warp::Rejection> {
+    // UTF-8 解码
+    let content = match String::from_utf8(body.to_vec()) {
+        Ok(s) => s,
+        Err(e) => {
+            let json = warp::reply::json(&serde_json::json!({
+                "status": "error",
+                "message": format!("无效的 UTF-8 内容: {}", e)
+            }));
+            let reply = warp::reply::with_status(json, StatusCode::BAD_REQUEST);
+            return Ok(Box::new(reply));
         }
     };
 
-    // 配置并发请求参数
-    let _concurrency_config = config_manager.create_concurrency_config();
-    let test_config = HMSClipTest_rs::concurrency_test::ConcurrencyConfig {
-        requests_per_second: 1, // 测试时使用较小的并发数
-        duration_seconds: 1,    // 测试时使用较短的持续时间
-        url: "https://10.41.131.103/ISAPI/SDT/Management/Task/Picture?format=json".to_string(),
-    };
+    // 根据内容判断并解析格式
+    match detect_and_parse_format(&content) {
+        Ok((payload, format)) => {
+            // 记录报警信息
+            println!(
+                "收到报警 - 格式: {:?}, 内容长度: {} 字节",
+                format,
+                content.len()
+            );
 
-    println!("并发请求配置: {:?}", test_config);
-    println!("开始并发请求测试...");
+            // 构造 Message 并异步投递到消息处理器（包含数据库记录）
+            let msg_format = match format.as_str() {
+                "JSON" => MessageFormat::Json,
+                "XML" => MessageFormat::Xml,
+                _ => MessageFormat::Unknown,
+            };
 
-    // 执行并发请求测试
-    let test_service = ConcurrencyTestService::new(http_client);
-    let test_result = test_service.run_test(&test_config, &json_content).await?;
+            let msg = Message {
+                id: Uuid::new_v4().to_string(),
+                source: MessageSource::Http,
+                payload: payload,
+                received_at: chrono::Utc::now(),
+                format: Some(msg_format),
+            };
 
-    // 打印测试结果
-    test_service.print_test_result(&test_result);
+            // 提前获取 DbRecorder 实例，避免在异步块内部 await
+            let recorder = get_recorder().await;
 
-    // 保存测试结果到文件
-    let detailed_json = serde_json::to_string_pretty(&test_result)?;
-    fs::write("detailed_concurrency_results.json", &detailed_json)?;
-    println!("已保存详细并发测试结果到 detailed_concurrency_results.json");
-
-    // 同时保存简版结果
-    let test_result_json = serde_json::to_string_pretty(&serde_json::json!({
-        "concurrency_test_results": test_result.summary,
-        "config": test_result.config
-    }))?;
-
-    fs::write("concurrency_test_results.json", &test_result_json)?;
-    println!("已保存并发测试结果到 concurrency_test_results.json");
-
-    // 示例 6: 启动 HTTP 服务接收报警
-    println!("\n=== 示例 6: 启动 HTTP 服务接收报警 ===");
-
-    println!("请求完成！所有示例执行完毕。");
-
-    // 保持程序运行，等待用户输入
-    println!("\nHTTP 服务器仍在后台运行，端口: {}", port);
-    println!("可以继续发送报警到: http://localhost:{}/alert", port);
-    println!("查看所有报警: http://localhost:{}/alerts", port);
-    println!("健康检查: http://localhost:{}/health", port);
-    println!("\n按 'q' + Enter 退出程序，或按其他键 + Enter 检查服务器状态...");
-
-    loop {
-        let mut input = String::new();
-        match std::io::stdin().read_line(&mut input) {
-            Ok(_) => {
-                match input.trim() {
-                    "q" | "Q" => {
-                        println!("正在退出程序...");
-                        break;
-                    }
-                    _ => {
-                        // 检查服务器状态
-                        match check_server_health(port).await {
-                            Ok(true) => println!("✅ HTTP 服务器运行正常"),
-                            Ok(false) => println!("❌ HTTP 服务器健康检查失败"),
-                            Err(e) => println!("❌ HTTP 服务器检查错误: {}", e),
-                        }
-                        println!("按 'q' + Enter 退出程序，或按其他键 + Enter 再次检查状态...");
-                    }
+            // 异步处理消息（不阻塞HTTP响应）
+            tokio::spawn(async move {
+                if let Err(e) = MessageProcessor::process_message_with_recorder(msg, recorder).await
+                {
+                    eprintln!("Message processing error: {}", e);
                 }
-            }
-            Err(error) => {
-                eprintln!("读取输入错误: {}", error);
-                println!("按 'q' + Enter 退出程序...");
-            }
+            });
+
+            let json = warp::reply::json(&serde_json::json!({
+                "status": "success",
+                "message": "报警已接收并转发到消息处理器",
+                "format": match format.as_str() {
+                    "JSON" => "JSON",
+                    "XML" => "XML",
+                    _ => "UNKNOWN",
+                },
+                "content_length": content.len()
+            }));
+            Ok(Box::new(warp::reply::with_status(json, StatusCode::OK)))
+        }
+        Err(e) => {
+            let json = warp::reply::json(&serde_json::json!({
+                "status": "error",
+                "message": format!("解析失败: {}", e)
+            }));
+            let reply = warp::reply::with_status(json, StatusCode::BAD_REQUEST);
+            Ok(Box::new(reply))
         }
     }
+}
 
-    println!("程序已退出。");
-    Ok(())
+/// 检测并解析报文格式
+fn detect_and_parse_format(
+    content: &str,
+) -> Result<(Value, String), Box<dyn std::error::Error + Send + Sync>> {
+    // 去除前导空白
+    let trimmed = content.trim_start();
+
+    // 基于内容特征判断格式
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        // 尝试解析 JSON
+        serde_json::from_str(trimmed)
+            .map(|value| (value, "JSON".to_string()))
+            .map_err(|e| {
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("JSON解析失败: {}", e),
+                )) as Box<dyn std::error::Error + Send + Sync>
+            })
+    } else if trimmed.starts_with("<?xml") || trimmed.starts_with('<') {
+        // 尝试解析 XML
+        xml_from_str(trimmed)
+            .map(|value| (value, "XML".to_string()))
+            .map_err(|e| {
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("XML解析失败: {}", e),
+                )) as Box<dyn std::error::Error + Send + Sync>
+            })
+    } else {
+        // 如果没有明显特征，尝试按顺序解析
+        if let Ok(value) = serde_json::from_str(trimmed) {
+            Ok((value, "JSON".to_string()))
+        } else if let Ok(value) = xml_from_str(trimmed) {
+            Ok((value, "XML".to_string()))
+        } else {
+            Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "无法识别的报文格式",
+            )) as Box<dyn std::error::Error + Send + Sync>)
+        }
+    }
 }

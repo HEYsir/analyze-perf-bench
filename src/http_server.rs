@@ -1,4 +1,4 @@
-use crate::db_adapter::{DbRecorder, get_recorder}; // 使用批量写入适配器
+use crate::db_adapter::get_recorder; // 使用批量写入适配器
 use crate::message::{Message, MessageFormat, MessageProcessor, MessageSource};
 use bytes::Bytes;
 use quick_xml::de::from_str as xml_from_str;

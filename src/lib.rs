@@ -16,7 +16,6 @@ pub mod http_client;
 pub mod http_server;
 pub mod json_processor;
 pub mod message;
-pub mod performance_test;
 
 // 重新导出主要类型，方便使用
 pub use concurrency_test::{
@@ -30,7 +29,6 @@ pub use http_client::{HttpClientConfig, HttpClientService};
 pub use http_server::{HttpServerService, start_http_server};
 pub use json_processor::{JsonProcessor, JsonProcessorError, parse_and_modify_json};
 pub use message::{Message, MessageFormat, MessageProcessor, MessageSource};
-pub use performance_test::{main_performance_test, run_performance_test};
 
 /// 库版本信息
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

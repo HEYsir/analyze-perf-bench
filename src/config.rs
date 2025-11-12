@@ -279,7 +279,7 @@ pub fn create_test_config() -> AppConfig {
         },
         http_server: HttpServerConfig {
             default_port: 8081,
-            bind_address: "127.0.0.1".to_string(),
+            bind_address: "0.0.0.0".to_string(),
             max_alerts: 1000,
         },
         file_paths: FilePathsConfig::default(),

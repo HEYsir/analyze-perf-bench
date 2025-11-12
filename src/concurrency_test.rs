@@ -1,4 +1,4 @@
-use crate::db_adapter::{DbRecorder, get_recorder}; // 使用批量写入适配器
+use crate::db_adapter::get_recorder; // 使用批量写入适配器
 use crate::http_client::HttpClientService;
 use crate::json_processor::JsonProcessor;
 use serde_json::Value;
